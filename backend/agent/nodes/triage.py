@@ -1,4 +1,4 @@
-"""② 응급도 판별 노드 (소유자: 고원영)"""
+"""② 응급도 판별 노드 (소유자: 박태준)"""
 from backend.agent.state import AgentState
 from backend.core.emergency_rules import is_emergency
 
