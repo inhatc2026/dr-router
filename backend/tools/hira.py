@@ -57,7 +57,10 @@ def resolve(dept: str) -> Tuple[str, Optional[Tuple[str, ...]]]:
 # 이 API는 반경 검색 한 번에 3~8초가 걸리고 결과가 거리순이 아니다(실측).
 # 그래서 여러 번 나눠 부르지 않고, 한 번에 넉넉히 받아 직접 정렬한다.
 # 도심은 2km로 충분하고, 모자랄 때만 20km로 한 번 더 부른다.
-RADII = (2000, 20000)
+# 반경 규칙(요구사항 FR-21 기준): 기본 2km → 5km → 그래도 없으면 더 넓혀 가장 가까운 곳을 안내
+# (시골은 5km 안에 해당 과가 없는 경우가 많다. 실측: 평창 안과는 가장 가까운 곳이 23km)
+RADII = (2000, 5000, 20000)               # API 경로 (한 번에 3~16초라 단계를 적게)
+DB_RADII = (2000, 5000, 20000, 200000)    # DB 경로 (빠르니 마지막은 사실상 전국)
 ROWS = 500
 TIMEOUT = 15
 
@@ -71,8 +74,8 @@ def search_hospitals(dept: str, lat: float, lng: float, top: int = 5) -> List[Di
     """진료과 + 위치로 주변 병원을 가까운 순으로 반환.
 
     반환 형식(= schemas.HospitalOut):
-      {"name","dept","distance_m","is_open","phone"}
-      is_open: True(진료중) / False(휴진·진료시간 밖) / None(정보 없음)
+      {"name","dept","distance_m","is_open","phone","kind","address","lat","lng"}
+      is_open: True(진료중) / False(휴진·진료시간 밖) / None(정보 없음),  kind: "병원"
     지원하지 않는 진료과이거나 API 호출에 실패하면 빈 리스트.
 
     병원 DB(hospital_db.py)가 있으면 DB에서 찾는다 → API 호출 0번, 수 ms.
@@ -104,16 +107,9 @@ def search_hospitals(dept: str, lat: float, lng: float, top: int = 5) -> List[Di
     return [{**h, "is_open": hours.is_open(schedule)} for h, schedule in rows]
 
 
-DB_RADII = (2000, 20000, 50000)  # DB는 빠르니 시골까지 넉넉히
-
-
 def _search_db(codes: Sequence[str], dept: str, lat: float, lng: float, top: int):
-    found = []
-    for radius in DB_RADII:
-        found = hospital_db.search(codes, lat, lng, radius, top)
-        if len(found) >= top:
-            break
-    return [({**h, "dept": dept}, schedule) for h, schedule in found]
+    found = hospital_db.nearest(lambda r: hospital_db.search(codes, lat, lng, r, top), DB_RADII, top)
+    return [({**h, "dept": dept, "kind": hospital_db.HOSPITAL}, schedule) for h, schedule in found]
 
 
 def _search(codes: Sequence[str], dept: str, lat: float, lng: float, top: int):
@@ -168,7 +164,16 @@ def _parse(it: Dict, dept: str, lat: float, lng: float):
         distance = haversine_m(lat, lng, it.get("YPos"), it.get("XPos"))
     if distance is None:
         return None
-    name, phone = it.get("yadmNm", ""), it.get("telno") or None
-    public = {"name": name, "dept": dept, "distance_m": distance, "phone": phone}
-    raw = {"name": name, "phone": phone, "addr": it.get("addr"), "ykiho": it.get("ykiho")}
+    name, phone, addr = it.get("yadmNm", ""), it.get("telno") or None, it.get("addr") or None
+    public = {"name": name, "dept": dept, "distance_m": distance, "phone": phone,
+              "kind": hospital_db.HOSPITAL, "address": addr,
+              "lat": _float(it.get("YPos")), "lng": _float(it.get("XPos"))}
+    raw = {"name": name, "phone": phone, "addr": addr, "ykiho": it.get("ykiho")}
     return public, raw
+
+
+def _float(value) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
