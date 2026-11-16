@@ -11,6 +11,7 @@ import csv
 import io
 import logging
 import os
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -67,6 +68,7 @@ def clear_caches():
     hira._cache.clear()
     egen._cache.update(at=0.0, items=[])
     hours.clear_caches()
+    hospital_db._region_cache.clear()
 
 
 def set_holidays(*days):
@@ -798,6 +800,39 @@ class PlacesDbTests(unittest.TestCase):
         # 서울 중구 '세종대로'는 도로명이라 '세종'에 걸리지 않아야 한다
         self.assertEqual(hospital_db.resolve_region("세종")["status"], "not_found")
         self.assertEqual(hospital_db.resolve_region("없는동네")["status"], "not_found")
+
+    def test_region_index_is_built_and_used(self):
+        con = sqlite3.connect(self.db_path)
+        try:
+            self.assertGreater(con.execute("SELECT COUNT(*) FROM area").fetchone()[0], 0)
+        finally:
+            con.close()
+        hospital_db._region_cache.clear()
+        # 색인이 있으면 주소를 다시 해석하지 않는다 (8만 건을 훑지 않음)
+        with mock.patch.object(hospital_db, "_admin_units", side_effect=AssertionError("주소 재해석 금지")):
+            self.assertEqual(hospital_db.resolve_region("서울 중구")["status"], "ok")
+
+    def test_region_result_is_cached_but_distance_follows_gps(self):
+        hospital_db._region_cache.clear()
+        hospital_db.resolve_region("중구")
+        # 수집 단계와 검색 단계가 같은 지역명을 다시 물어도 DB를 다시 열지 않는다
+        with mock.patch.object(hospital_db, "_connect", side_effect=AssertionError("캐시를 써야 함")):
+            busan = hospital_db.resolve_region("중구", near=(35.18, 129.07))
+            seoul = hospital_db.resolve_region("중구", near=CITY_HALL)
+        self.assertEqual(busan["candidates"][0]["name"], "부산광역시 중구")
+        self.assertEqual(seoul["candidates"][0]["name"], "서울특별시 중구")
+
+    def test_empty_index_falls_back_to_address_scan(self):
+        # place 표에 직접 넣어 만든 DB(그래프 통합 테스트용 등)도 지역명을 찾을 수 있어야 한다
+        con = sqlite3.connect(self.db_path)
+        try:
+            con.execute("DELETE FROM area")
+            con.commit()
+        finally:
+            con.close()
+        hospital_db._region_cache.clear()
+        self.assertEqual(hospital_db.resolve_region("서울 중구")["status"], "ok")
+        self.assertEqual(hospital_db.resolve_region("중구")["status"], "ambiguous")
 
     def test_admin_units(self):
         for addr, expected in [
