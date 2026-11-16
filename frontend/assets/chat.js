@@ -28,6 +28,7 @@ function appendMessage(role, content) {
   row.append(chatApi.element("span", "av", role === "user" ? "나" : "AI"), chatApi.element("div", "bubble", content));
   conversation.append(row);
   row.scrollIntoView({ block: "nearest" });
+  return row;
 }
 function clearLocation() {
   locationRequest += 1;
@@ -97,7 +98,7 @@ chatForm.addEventListener("submit", async event => {
   const region = regionInput.value.trim() || null;
   const requestPoint = point;
   chatStatus.textContent = "답변을 기다리고 있습니다…";
-  appendMessage("user", message);
+  const pendingMessage = appendMessage("user", message);
   try {
     const response = await chatApi.sendChat(message, { ...requestPoint, region, history });
     history.push({ role: "user", content: message }, { role: "assistant", content: response.reply });
@@ -135,13 +136,16 @@ chatForm.addEventListener("submit", async event => {
       recommendations.append(chatApi.element("p", "", "진료과를 판단할 정보가 부족합니다. 의료기관을 방문해 상담해 주세요."));
       recommendations.hidden = false;
     }
-    const saved = chatApi.saveResults(response, region || (requestPoint ? "현재 위치" : "위치 미지정"), requestPoint);
+    // 응답 계약에 실제 검색 중심점이 없으므로 입력값을 검색 위치라고 단정하지 않는다.
+    const locationLabel = region ? `요청 지역: ${region}` : requestPoint ? "요청 위치: 현재 GPS" : "위치 미지정";
+    const saved = chatApi.saveResults(response, locationLabel, requestPoint);
     resultsLink.hidden = !saved;
     resultsLink.textContent = response.hospitals.length
       ? `의료기관 ${response.hospitals.length}곳 보기 →` : "의료기관 검색 결과 보기 →";
     chatStatus.textContent = !saved ? "이 탭에 목록을 보관할 수 없습니다. 브라우저 저장 설정을 확인해 주세요."
       : response.need_more_info ? "추가 질문에 답해 주세요." : "답변을 확인해 주세요.";
   } catch (error) {
+    pendingMessage.remove();
     chatStatus.textContent = error instanceof TypeError ? "연결하지 못했습니다. 입력 내용은 유지됩니다. 다시 전송해 주세요." : error.message;
   } finally {
     busy = false;

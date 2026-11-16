@@ -138,12 +138,14 @@ async function checkAccessibility(page) {
     await page.locator('#send').click();
     await page.waitForFunction(() => document.querySelector('#chat-status').textContent.includes('다시 전송'));
     assert.equal(await page.locator('#message').inputValue(), '재시도할 입력');
+    assert.equal(await page.locator('#conversation .msg.me').count(), 0);
     assert.equal(await page.locator('#send').isDisabled(), false);
     assert.equal(await page.locator('#results-link').isVisible(), false);
     assert.equal(await page.evaluate(() => DrRouter.loadResults()), null);
     mode = 'unsafe-text';
     await page.locator('#send').click();
     await page.locator('#results-link').waitFor({ state: 'visible' });
+    assert.equal(await page.locator('#conversation .msg.me').count(), 1);
     assert.equal(await page.locator('#conversation img').count(), 0);
     assert.equal(await page.evaluate(() => window.injected), undefined);
     await page.locator('#results-link').click();
