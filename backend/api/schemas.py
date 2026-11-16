@@ -23,7 +23,7 @@ class HospitalOut(BaseModel):
     name: str
     dept: str
     distance_m: int
-    is_open: bool
+    is_open: Optional[bool] = None          # True 진료중 / False 휴진·진료시간 밖 / None 정보 없음
     phone: Optional[str] = None
 
 

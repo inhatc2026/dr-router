@@ -1,16 +1,174 @@
 """심평원 병원정보 OpenAPI (소유자: 최건)"""
-from typing import List, Dict
-import requests
+import logging
+import sqlite3
+import time
+from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from backend.config import HIRA_API_KEY
+from backend.tools import hospital_db, hours
+from backend.tools._common import fetch_items, haversine_m
+
+logger = logging.getLogger(__name__)
+
+# 병원기본목록. xPos(경도)/yPos(위도)/radius(m)를 주면 반경 검색이 되고
+# 응답에 distance(m)가 붙는다. (실제 호출로 확인)
+BASE = "https://apis.data.go.kr/B551182/hospInfoServicev2/getHospBasisList"
+
+# 진료과목코드(dgsbjtCd). 서울 의원 간판명과 대조해 실측 검증한 값.
+DGSBJT = {
+    "내과": "01", "신경과": "02", "정신건강의학과": "03", "외과": "04",
+    "정형외과": "05", "신경외과": "06", "심장혈관흉부외과": "07", "성형외과": "08",
+    "마취통증의학과": "09", "산부인과": "10", "소아청소년과": "11", "안과": "12",
+    "이비인후과": "13", "피부과": "14", "비뇨의학과": "15", "영상의학과": "16",
+    "재활의학과": "21", "가정의학과": "23",
+}
+# 옛 이름·줄임말 → 표준 진료과명
+ALIASES = {
+    "정신과": "정신건강의학과", "흉부외과": "심장혈관흉부외과", "소아과": "소아청소년과",
+    "비뇨기과": "비뇨의학과", "통증의학과": "마취통증의학과",
+}
+
+# 치과는 진료과목코드가 12개로 나뉘고, 치과의원 대부분은 '49 치과'가 아니라 세부 코드로
+# 등록돼 있다(실측: 49만 쓰면 전국 927곳, 12개 전체면 20,122곳). 그래서 전부 묶어서 찾는다.
+DENTAL_CODES = ("49", "50", "51", "52", "53", "54", "55", "56", "57", "58", "59", "61")
+DENTAL_SUBJECTS = {"구강악안면외과", "치과보철과", "치과교정과", "소아치과", "치주과", "치과보존과",
+                   "구강내과", "영상치의학과", "구강병리과", "예방치과", "통합치의학과"}
+# DB가 없을 때의 API 검색은 진료과목코드를 하나만 받으므로, 치과는 종별(치과병원 41, 치과의원 51)로 찾는다
+API_FILTERS = {"치과": ({"clCd": "41"}, {"clCd": "51"})}
 
 
-def search_hospitals(dept: str, lat: float, lng: float) -> List[Dict]:
-    """진료과 + 위치로 주변 병원을 검색해 정규화된 목록으로 반환.
+def resolve(dept: str) -> Tuple[str, Optional[Tuple[str, ...]]]:
+    """진료과명 → (표준 진료과명, 진료과목코드들). 모르는 과면 코드는 None.
+
+    예: '소화기내과' → ('내과', ('01',)),  '치주과' → ('치과', DENTAL_CODES),  '한방내과' → (.., None)
+    """
+    dept = ALIASES.get(dept, dept)
+    if dept in DENTAL_SUBJECTS:  # '구강내과'도 여기서 치과로 (아래 '…내과' 규칙보다 먼저)
+        dept = "치과"
+    if dept == "치과":
+        return dept, DENTAL_CODES
+    # 순환기·소화기·호흡기·내분비·신장내과 등 세부 분과는 심평원 코드상 내과(01) 하나뿐
+    if dept not in DGSBJT and dept.endswith("내과") and not dept.startswith("한방"):
+        dept = "내과"
+    code = DGSBJT.get(dept)
+    return dept, ((code,) if code else None)
+
+# 이 API는 반경 검색 한 번에 3~8초가 걸리고 결과가 거리순이 아니다(실측).
+# 그래서 여러 번 나눠 부르지 않고, 한 번에 넉넉히 받아 직접 정렬한다.
+# 도심은 2km로 충분하고, 모자랄 때만 20km로 한 번 더 부른다.
+RADII = (2000, 20000)
+ROWS = 500
+TIMEOUT = 15
+
+# 같은 위치·진료과 재검색은 10분간 캐시. 캐시에는 진료시간표를 넣어 두고
+# is_open은 꺼낼 때마다 현재 시각으로 다시 계산한다.
+_CACHE_TTL = 10 * 60
+_cache: Dict[Tuple, Tuple[float, List[Tuple[Dict, Optional[hours.Schedule]]]]] = {}
+
+
+def search_hospitals(dept: str, lat: float, lng: float, top: int = 5) -> List[Dict]:
+    """진료과 + 위치로 주변 병원을 가까운 순으로 반환.
 
     반환 형식(= schemas.HospitalOut):
       {"name","dept","distance_m","is_open","phone"}
+      is_open: True(진료중) / False(휴진·진료시간 밖) / None(정보 없음)
+    지원하지 않는 진료과이거나 API 호출에 실패하면 빈 리스트.
 
-    TODO: 심평원 병원정보서비스 엔드포인트 호출 + 파싱 + 거리 계산
+    병원 DB(hospital_db.py)가 있으면 DB에서 찾는다 → API 호출 0번, 수 ms.
+    없으면 API로 찾는다 → 병원 목록 1~2번 + 진료시간 (시군구 수)번, 3~16초.
     """
-    return []
+    dept, codes = resolve(dept)
+    if codes is None:
+        logger.warning("진료과목코드를 모르는 진료과: %s", dept)
+        return []
+    if lat is None or lng is None:
+        return []
+
+    if hospital_db.available():
+        try:
+            rows = _search_db(codes, dept, lat, lng, top)
+            return [{**h, "is_open": hours.is_open(schedule)} for h, schedule in rows]
+        except sqlite3.Error as e:  # DB 파일이 깨졌으면 API로 대신 찾는다
+            logger.warning("병원 DB 검색 실패 (%s) — API로 검색", e)
+
+    cache_key = (codes, round(lat, 3), round(lng, 3), top)  # 소수 3자리 ≈ 100m
+    cached = _cache.get(cache_key)
+    if cached and time.time() - cached[0] < _CACHE_TTL:
+        rows = cached[1]
+    else:
+        rows = _search(codes, dept, lat, lng, top)
+        if rows:  # 실패(빈 결과)는 캐시하지 않고 다음 호출 때 다시 시도
+            _cache[cache_key] = (time.time(), rows)
+
+    return [{**h, "is_open": hours.is_open(schedule)} for h, schedule in rows]
+
+
+DB_RADII = (2000, 20000, 50000)  # DB는 빠르니 시골까지 넉넉히
+
+
+def _search_db(codes: Sequence[str], dept: str, lat: float, lng: float, top: int):
+    found = []
+    for radius in DB_RADII:
+        found = hospital_db.search(codes, lat, lng, radius, top)
+        if len(found) >= top:
+            break
+    return [({**h, "dept": dept}, schedule) for h, schedule in found]
+
+
+def _search(codes: Sequence[str], dept: str, lat: float, lng: float, top: int):
+    filters = API_FILTERS.get(dept) or tuple({"dgsbjtCd": c} for c in codes)
+    found: List[Tuple[Dict, Dict]] = []
+    for radius in RADII:
+        items = _fetch_merged(filters, {
+            "pageNo": 1, "numOfRows": ROWS,
+            "xPos": lng, "yPos": lat, "radius": radius,
+        })
+        if items is None:  # 호출 실패: 반경을 넓혀 다시 불러도 같은 서버라 기다림만 늘어난다
+            break
+        if len(items) >= ROWS:
+            logger.warning("반경 %sm 안에 %s 병원이 %s곳 이상 — 가장 가까운 곳이 빠졌을 수 있음", radius, dept, ROWS)
+        found = [r for r in (_parse(it, dept, lat, lng) for it in items) if r]
+        if len(found) >= top:
+            break
+
+    if not found:
+        return []
+    found.sort(key=lambda r: r[0]["distance_m"])
+    found = found[:top]
+    # 상위 N곳의 진료시간을 한꺼번에 조회 (병원마다 따로 부르지 않음)
+    schedules = hours.lookup_schedules([raw for _, raw in found])
+    return [(h, s) for (h, _), s in zip(found, schedules)]
+
+
+def _fetch_merged(filters: Sequence[Dict], params: Dict) -> Optional[List[Dict]]:
+    """조건이 여러 개면(예: 치과병원 + 치과의원) 동시에 불러 합친다. 하나라도 실패하면 None."""
+    calls = [{**params, **f} for f in filters]
+    if len(calls) == 1:
+        results = [fetch_items(BASE, HIRA_API_KEY, calls[0], timeout=TIMEOUT)]
+    else:
+        with ThreadPoolExecutor(max_workers=len(calls)) as ex:
+            results = list(ex.map(lambda p: fetch_items(BASE, HIRA_API_KEY, p, timeout=TIMEOUT), calls))
+    if any(r is None for r in results):
+        return None
+    merged, seen = [], set()
+    for it in (it for r in results for it in r):
+        key = it.get("ykiho") or (it.get("yadmNm"), it.get("addr"))
+        if key not in seen:
+            seen.add(key)
+            merged.append(it)
+    return merged
+
+
+def _parse(it: Dict, dept: str, lat: float, lng: float):
+    """API 항목 → (응답용 dict, 진료시간 조회용 원본 값). 좌표가 없으면 None."""
+    try:
+        distance = int(float(it["distance"]))
+    except (KeyError, TypeError, ValueError):
+        distance = haversine_m(lat, lng, it.get("YPos"), it.get("XPos"))
+    if distance is None:
+        return None
+    name, phone = it.get("yadmNm", ""), it.get("telno") or None
+    public = {"name": name, "dept": dept, "distance_m": distance, "phone": phone}
+    raw = {"name": name, "phone": phone, "addr": it.get("addr"), "ykiho": it.get("ykiho")}
+    return public, raw
