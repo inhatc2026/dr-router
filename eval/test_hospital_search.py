@@ -778,6 +778,37 @@ class PlacesDbTests(unittest.TestCase):
             with self.subTest(region=region):
                 self.assertIsNone(hospital_db.locate(region))
 
+    def test_resolve_region_ok(self):
+        r = hospital_db.resolve_region("서울 중구")
+        self.assertEqual((r["status"], r["name"], r["candidates"]), ("ok", "서울특별시 중구", []))
+        self.assertEqual(hospital_db.resolve_region("종로")["name"], "서울특별시 종로구")  # 줄임말도 됨
+
+    def test_resolve_region_ambiguous_with_candidates(self):
+        # 요구사항 FR-29·FR-30: '중구'는 서울·부산 두 곳 → 위치를 정하지 않고 후보를 준다
+        r = hospital_db.resolve_region("중구")
+        self.assertEqual((r["status"], r["point"]), ("ambiguous", None))
+        self.assertEqual([c["name"] for c in r["candidates"]], ["서울특별시 중구", "부산광역시 중구"])  # 병원 많은 순
+        self.assertIsNone(r["candidates"][0]["distance_m"])
+        busan_gps = (35.18, 129.07)
+        near = hospital_db.resolve_region("중구", near=busan_gps)["candidates"]
+        self.assertEqual(near[0]["name"], "부산광역시 중구")  # GPS가 있으면 가까운 순
+        self.assertLess(near[0]["distance_m"], near[1]["distance_m"])
+
+    def test_resolve_region_ignores_road_names(self):
+        # 서울 중구 '세종대로'는 도로명이라 '세종'에 걸리지 않아야 한다
+        self.assertEqual(hospital_db.resolve_region("세종")["status"], "not_found")
+        self.assertEqual(hospital_db.resolve_region("없는동네")["status"], "not_found")
+
+    def test_admin_units(self):
+        for addr, expected in [
+            ("서울특별시 중구 세종대로 124, 3층 (태평로1가)", ["서울특별시", "중구", "태평로1가"]),
+            ("경기도 수원시 권선구 효원로256번길 7 (권선동)", ["경기도", "수원시", "권선구", "권선동"]),
+            ("세종특별자치시 새롬중앙로 55, 3층 (새롬동, 행운빌딩)", ["세종특별자치시", "새롬동"]),
+            ("경기도 여주시 세종대왕면 영릉로 1", ["경기도", "여주시", "세종대왕면"]),
+            ("", [])]:
+            with self.subTest(addr=addr):
+                self.assertEqual(hospital_db._admin_units(addr), expected)
+
     def test_old_format_db_is_not_used(self):
         with mock.patch.object(hospital_db, "SCHEMA_VERSION", "옛날"), \
                 self.assertLogs("backend.tools.hospital_db", logging.WARNING):
@@ -931,18 +962,42 @@ class SearchNodeTests(unittest.TestCase):
         self.assertEqual([h["name"] for h in out["hospitals"]], ["약국", "응급실"])
         self.hira.assert_not_called()
 
+    OK = {"status": "ok", "point": (37.45, 126.67), "name": "인천광역시 미추홀구", "candidates": []}
+    AMBIGUOUS = {"status": "ambiguous", "point": None, "name": None, "candidates": [{"name": "서울특별시 중구"}]}
+
+    def _region(self, result):
+        p1 = mock.patch("backend.tools.hospital_db.available", return_value=True)
+        p2 = mock.patch("backend.tools.hospital_db.resolve_region", return_value=result)
+        p1.start()
+        self.addCleanup(p1.stop)
+        resolve = p2.start()
+        self.addCleanup(p2.stop)
+        return resolve
+
     def test_region_used_when_no_coordinates(self):
-        with mock.patch("backend.tools.hospital_db.available", return_value=True), \
-                mock.patch("backend.tools.hospital_db.locate", return_value=(37.45, 126.67)) as locate:
-            search.search_hospitals({**self.STATE, "location": {"region": "인천 미추홀구"}})
-        locate.assert_called_once_with("인천 미추홀구")
+        resolve = self._region(self.OK)
+        search.search_hospitals({**self.STATE, "location": {"region": "인천 미추홀구"}})
+        resolve.assert_called_once_with("인천 미추홀구", None)
         self.hira.assert_called_once_with("정형외과", 37.45, 126.67)
 
-    def test_unknown_region_or_no_db(self):
-        with mock.patch("backend.tools.hospital_db.available", return_value=True), \
-                mock.patch("backend.tools.hospital_db.locate", return_value=None):
-            self.assertEqual(search.search_hospitals({**self.STATE, "location": {"region": "중구"}}), {"hospitals": []})
+    def test_region_overrides_gps(self):
+        # "중구에서 안과 찾아줘"처럼 사용자가 말한 지역이 정해지면 GPS보다 우선
+        resolve = self._region(self.OK)
+        search.search_hospitals({**self.STATE, "location": {"lat": 35.1, "lng": 129.0, "region": "인천 미추홀구"}})
+        resolve.assert_called_once_with("인천 미추홀구", (35.1, 129.0))  # 후보 정렬용으로 GPS도 넘김
+        self.hira.assert_called_once_with("정형외과", 37.45, 126.67)
+
+    def test_ambiguous_region_falls_back_to_gps_or_nothing(self):
+        self._region(self.AMBIGUOUS)
+        search.search_hospitals({**self.STATE, "location": {"lat": 35.1, "lng": 129.0, "region": "중구"}})
+        self.hira.assert_called_once_with("정형외과", 35.1, 129.0)
+        self.hira.reset_mock()
+        self.assertEqual(search.search_hospitals({**self.STATE, "location": {"region": "중구"}}), {"hospitals": []})
+        self.hira.assert_not_called()
+
+    def test_find_region_without_db(self):
         with mock.patch("backend.tools.hospital_db.available", return_value=False):
+            self.assertEqual(search.find_region("인천")["status"], "unavailable")
             self.assertEqual(search.search_hospitals({**self.STATE, "location": {"region": "인천"}}), {"hospitals": []})
         self.hira.assert_not_called()
 
