@@ -148,31 +148,114 @@ def _near(kind, lat, lng, radius_m, limit, extra="", extra_args=()):
     return [(p, hours.Schedule.from_json(s)) for p, s in found[:limit]]
 
 
-def locate(region: str) -> Optional[Tuple[float, float]]:
-    """'인천 미추홀구', '서울 강남구 역삼동' 같은 지역명 → 그 지역의 중심 좌표(위도, 경도).
+# ── 지역명 → 좌표 (요구사항 FR-29·FR-30·EX-03·EX-11) ─────────
 
-    위치 권한을 거부한 사용자용(요구사항 EX-03). 외부 지도 API 없이, DB에 있는 병원 주소 중
-    지역명이 모두 들어간 곳들의 가운데(중앙값) 좌표를 쓴다.
-    못 찾거나 '중구'처럼 여러 도시에 걸쳐 애매하면 None (지역을 더 자세히 물어보면 된다).
+REGION_OK, REGION_AMBIGUOUS, REGION_NOT_FOUND = "ok", "ambiguous", "not_found"
+_ADMIN_SUFFIX = ("특별시", "광역시", "특별자치시", "특별자치도", "도", "시", "군", "구", "읍", "면", "동", "가", "리")
+_COMPACT_M = 15000  # 한 지역으로 볼 범위: 80%가 중심에서 15km 안
+_DOMINANT = 0.95    # 한 곳이 95% 이상이면 그곳으로 본다 ('신사동'은 강남구 93%·은평구 7% → 되묻기)
+
+
+def resolve_region(text: str, near: Optional[Tuple[float, float]] = None) -> Dict:
+    """지역명을 판정한다. 외부 지도 API 없이 DB의 병원 주소(행정구역 부분)로 찾는다.
+
+    반환: {"status", "point", "name", "candidates"}
+      ok         : 한 곳으로 정해짐 → point=(위도, 경도), name="서울특별시 강남구"
+      ambiguous  : '중구'(5개 도시)·'제주'(제주시·서귀포시)처럼 여러 곳 → candidates에 후보
+                   [{"name","lat","lng","count","distance_m"}] (near=GPS를 주면 가까운 순, 아니면 병원 많은 순)
+                   후보가 비어 있으면 범위가 너무 넓은 것 → 더 자세히 되묻기
+      not_found  : 모르는 지역명
+    시군구·읍면동 단위까지 지원한다. 도로명('세종대로', '강남대로')에는 걸리지 않는다.
     """
-    tokens = [t for t in re.split(r"[\s,]+", str(region or "").strip()) if t][:4]
+    result = {"status": REGION_NOT_FOUND, "point": None, "name": None, "candidates": []}
+    tokens = [t for t in re.split(r"[\s,]+", str(text or "").strip()) if t][:4]
     if not tokens:
-        return None
-    escape = lambda t: t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")  # noqa: E731
-    where = " AND ".join("addr LIKE ? ESCAPE '\\'" for _ in tokens)
+        return result
+    longest = max(tokens, key=len)
+    escape = longest.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     con = _connect()
-    try:
-        rows = con.execute(f"SELECT lat, lng FROM place WHERE kind = ? AND {where}",
-                           (HOSPITAL, *[f"%{escape(t)}%" for t in tokens])).fetchall()
+    try:  # 가장 긴 단어로 먼저 좁힌 뒤, 행정구역 단위로 다시 확인한다
+        rows = con.execute("SELECT addr, lat, lng FROM place WHERE kind = ? AND addr LIKE ? ESCAPE '\\'",
+                           (HOSPITAL, f"%{escape}%")).fetchall()
     finally:
         con.close()
-    if not rows:
-        return None
-    lat, lng = median(r[0] for r in rows), median(r[1] for r in rows)
-    near = sum(1 for r in rows if (haversine_m(lat, lng, r[0], r[1]) or 0) <= 15000)
-    if near < 0.8 * len(rows):  # 같은 이름의 지역이 여러 곳 (예: 서울 중구 / 부산 중구)
-        return None
-    return lat, lng
+    matched = []
+    for addr, lat, lng in rows:
+        units = _admin_units(addr)
+        if all(any(u.startswith(t) for u in units) for t in tokens):
+            matched.append((units, lat, lng))
+    if not matched:
+        return result
+
+    groups = _significant(_group(matched, 2), len(matched))
+    top = max(groups, key=lambda k: len(groups[k]))
+    if len(groups[top]) >= _DOMINANT * len(matched):  # '강남'(강남구 99.5%), '세종'(세종시 99%)은 그곳으로
+        groups = {top: groups[top]}
+    if len(groups) == 1:
+        (name, pts), = groups.items()
+        center = _center(pts)
+        if _compact(center, pts):
+            return {**result, "status": REGION_OK, "point": center, "name": name}
+        groups = _significant(_group(pts, 3), len(pts))  # 넓은 시(예: 용인시)는 구 단위 후보로
+        if len(groups) == 1:
+            groups = {}  # 더 나눌 수 없을 만큼 넓음 → 후보 없이 되묻기
+
+    candidates = []
+    for name, pts in groups.items():
+        lat, lng = _center(pts)
+        candidates.append({"name": name, "lat": lat, "lng": lng, "count": len(pts),
+                           "distance_m": haversine_m(near[0], near[1], lat, lng) if near else None})
+    candidates.sort(key=(lambda c: c["distance_m"]) if near else (lambda c: -c["count"]))
+    return {**result, "status": REGION_AMBIGUOUS, "candidates": candidates[:5]}
+
+
+def locate(region: str) -> Optional[Tuple[float, float]]:
+    """지역명이 한 곳으로 정해지면 그 중심 좌표, 아니면 None. (자세한 판정은 resolve_region)"""
+    return resolve_region(region)["point"]
+
+
+def _admin_units(addr: str) -> List[str]:
+    """주소의 행정구역 부분만. '서울특별시 중구 세종대로 124, 3층 (태평로1가)' → ['서울특별시','중구','태평로1가']"""
+    addr = str(addr or "")
+    units = []
+    for part in addr.split()[:4]:
+        part = part.strip(",")
+        if not part.endswith(_ADMIN_SUFFIX):
+            break  # 도로명부터는 행정구역이 아님
+        units.append(part)
+    tail = re.search(r"\(([^()]*)\)\s*$", addr)  # 끝의 괄호 속 법정동
+    if tail:
+        units += [x.strip() for x in tail.group(1).split(",") if x.strip().endswith(("동", "가", "리", "읍", "면"))]
+    return units
+
+
+def _group(points, level: int) -> Dict[str, List[Tuple[List[str], float, float]]]:
+    """[(행정구역, 위도, 경도)] → {"서울특별시 중구": [(행정구역, 위도, 경도), ...]}. level 2=시도·시군구, 3=+구"""
+    groups: Dict[str, List] = {}
+    for units, lat, lng in points:
+        key = units[:1]
+        if len(units) > 1 and units[1].endswith(("시", "군", "구")):
+            key = units[:2]
+            if level >= 3 and len(units) > 2 and units[2].endswith("구"):
+                key = units[:3]
+        groups.setdefault(" ".join(key), []).append((units, lat, lng))
+    return groups
+
+
+def _significant(groups, total: int):
+    """주소 표기 잡음(한두 곳)을 뺀 후보만. 3곳 이상이거나 전체의 5% 이상"""
+    return {k: v for k, v in groups.items() if len(v) >= 3 or len(v) >= 0.05 * total}
+
+
+def _center(pts) -> Tuple[float, float]:
+    pts = [p[-2:] for p in pts]
+    return median(p[0] for p in pts), median(p[1] for p in pts)
+
+
+def _compact(center, pts) -> bool:
+    pts = [p[-2:] for p in pts]
+    inside = sum(1 for lat, lng in pts if (haversine_m(center[0], center[1], lat, lng) or 0) <= _COMPACT_M)
+    return inside >= 0.8 * len(pts)
 
 
 def holidays(year: int) -> Optional[Set[date]]:
