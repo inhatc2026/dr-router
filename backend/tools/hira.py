@@ -1,9 +1,10 @@
 """심평원 병원정보 OpenAPI (소유자: 최건)"""
 import logging
 import time
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from backend.config import HIRA_API_KEY
+from backend.tools import hours
 from backend.tools._common import fetch_items, haversine_m
 
 logger = logging.getLogger(__name__)
@@ -33,8 +34,10 @@ RADII = (2000, 20000)
 ROWS = 500
 TIMEOUT = 15
 
-_CACHE_TTL = 10 * 60  # 같은 위치·진료과 재검색은 10분간 캐시 (병원 목록은 거의 안 바뀜)
-_cache: Dict[Tuple, Tuple[float, List[Dict]]] = {}
+# 같은 위치·진료과 재검색은 10분간 캐시. 캐시에는 진료시간표를 넣어 두고
+# is_open은 꺼낼 때마다 현재 시각으로 다시 계산한다.
+_CACHE_TTL = 10 * 60
+_cache: Dict[Tuple, Tuple[float, List[Tuple[Dict, Optional[hours.Schedule]]]]] = {}
 
 
 def search_hospitals(dept: str, lat: float, lng: float, top: int = 5) -> List[Dict]:
@@ -42,7 +45,10 @@ def search_hospitals(dept: str, lat: float, lng: float, top: int = 5) -> List[Di
 
     반환 형식(= schemas.HospitalOut):
       {"name","dept","distance_m","is_open","phone"}
+      is_open: True(진료중) / False(휴진·진료시간 밖) / None(정보 없음)
     지원하지 않는 진료과이거나 API 호출에 실패하면 빈 리스트.
+
+    API 호출: 병원 목록 1~2번 + 진료시간 (시군구 수)번 — 병원 수만큼 부르지 않는다.
     """
     dept = ALIASES.get(dept, dept)
     code = DGSBJT.get(dept)
@@ -52,41 +58,52 @@ def search_hospitals(dept: str, lat: float, lng: float, top: int = 5) -> List[Di
     if lat is None or lng is None:
         return []
 
-    cache_key = (code, round(lat, 3), round(lng, 3))  # 소수 3자리 ≈ 100m
+    cache_key = (code, round(lat, 3), round(lng, 3), top)  # 소수 3자리 ≈ 100m
     cached = _cache.get(cache_key)
     if cached and time.time() - cached[0] < _CACHE_TTL:
-        return cached[1][:top]
+        rows = cached[1]
+    else:
+        rows = _search(code, dept, lat, lng, top)
+        if rows:  # 실패(빈 결과)는 캐시하지 않고 다음 호출 때 다시 시도
+            _cache[cache_key] = (time.time(), rows)
 
-    out: List[Dict] = []
+    return [{**h, "is_open": hours.is_open(schedule)} for h, schedule in rows]
+
+
+def _search(code: str, dept: str, lat: float, lng: float, top: int):
+    found: List[Tuple[Dict, Dict]] = []
     for radius in RADII:
         items = fetch_items(BASE, HIRA_API_KEY, {
             "pageNo": 1, "numOfRows": ROWS,
             "xPos": lng, "yPos": lat, "radius": radius,
             "dgsbjtCd": code,
         }, timeout=TIMEOUT)
+        if items is None:  # 호출 실패: 반경을 넓혀 다시 불러도 같은 서버라 기다림만 늘어난다
+            break
         if len(items) >= ROWS:
             logger.warning("반경 %sm 안에 %s 병원이 %s곳 이상 — 가장 가까운 곳이 빠졌을 수 있음", radius, dept, ROWS)
-        out = [h for h in (_normalize(it, dept, lat, lng) for it in items) if h]
-        if len(out) >= top:
+        found = [r for r in (_parse(it, dept, lat, lng) for it in items) if r]
+        if len(found) >= top:
             break
 
-    out.sort(key=lambda h: h["distance_m"])
-    if out:  # 실패(빈 결과)는 캐시하지 않고 다음 호출 때 다시 시도
-        _cache[cache_key] = (time.time(), out)
-    return out[:top]
+    if not found:
+        return []
+    found.sort(key=lambda r: r[0]["distance_m"])
+    found = found[:top]
+    # 상위 N곳의 진료시간을 한꺼번에 조회 (병원마다 따로 부르지 않음)
+    schedules = hours.lookup_schedules([raw for _, raw in found])
+    return [(h, s) for (h, _), s in zip(found, schedules)]
 
 
-def _normalize(it: Dict, dept: str, lat: float, lng: float):
+def _parse(it: Dict, dept: str, lat: float, lng: float):
+    """API 항목 → (응답용 dict, 진료시간 조회용 원본 값). 좌표가 없으면 None."""
     try:
         distance = int(float(it["distance"]))
     except (KeyError, TypeError, ValueError):
         distance = haversine_m(lat, lng, it.get("YPos"), it.get("XPos"))
     if distance is None:
         return None
-    return {
-        "name": it.get("yadmNm", ""),
-        "dept": dept,
-        "distance_m": distance,
-        "is_open": True,  # 병원기본목록에는 운영시간이 없음 → 우선 True (팀 협의 필요)
-        "phone": it.get("telno") or None,
-    }
+    name, phone = it.get("yadmNm", ""), it.get("telno") or None
+    public = {"name": name, "dept": dept, "distance_m": distance, "phone": phone}
+    raw = {"name": name, "phone": phone, "addr": it.get("addr"), "ykiho": it.get("ykiho")}
+    return public, raw

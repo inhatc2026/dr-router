@@ -1,6 +1,8 @@
 """④ 의료기관 검색 노드 (소유자: 최건)"""
+from concurrent.futures import ThreadPoolExecutor
+
 from backend.agent.state import AgentState
-from backend.tools import hira, egen
+from backend.tools import egen, hira
 
 
 def search_hospitals(state: AgentState) -> dict:
@@ -12,7 +14,10 @@ def search_hospitals(state: AgentState) -> dict:
 
     hospitals = []
     if top_dept and loc.get("lat") and loc.get("lng"):
-        hospitals += hira.search_hospitals(top_dept, loc["lat"], loc["lng"])
-        hospitals += egen.search_emergency(loc["lat"], loc["lng"])
+        # 병원 검색과 응급실 검색은 서로 독립이라 동시에 부른다
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            near = ex.submit(hira.search_hospitals, top_dept, loc["lat"], loc["lng"])
+            er = ex.submit(egen.search_emergency, loc["lat"], loc["lng"])
+            hospitals = near.result() + er.result()
 
     return {"hospitals": hospitals}

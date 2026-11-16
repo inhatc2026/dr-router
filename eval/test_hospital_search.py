@@ -9,14 +9,17 @@
 """
 import logging
 import os
+import time
 import unittest
+from datetime import date, datetime, timedelta, timezone
 from unittest import mock
 
 import requests
 
 from backend.agent.nodes import search
 from backend.api.schemas import HospitalOut
-from backend.tools import _common, egen, hira
+from backend.tools import _common, egen, hira, hours
+from backend.tools.hours import KST, Schedule
 
 CITY_HALL = (37.5665, 126.9780)  # 서울시청
 
@@ -32,22 +35,44 @@ def api_response(items, code="00", msg="NORMAL SERVICE."):
     return resp
 
 
-def hira_item(name, distance, phone="02-000-0000", **extra):
-    return {"yadmNm": name, "distance": str(distance), "telno": phone,
-            "XPos": "126.97", "YPos": 37.56, **extra}
+def hira_item(name, distance, phone="02-000-0000", addr="서울특별시 중구 세종대로 1", ykiho=None, **extra):
+    return {"yadmNm": name, "distance": str(distance), "telno": phone, "addr": addr,
+            "ykiho": ykiho or f"Y-{name}", "XPos": "126.97", "YPos": 37.56, **extra}
 
 
 def er_item(name, lat, lng, tel1="02-111-1111", tel3="02-999-9999"):
     return {"dutyName": name, "wgs84Lat": lat, "wgs84Lon": lng, "dutyTel1": tel1, "dutyTel3": tel3}
 
 
+def nmc_item(name, tel, **times):
+    """병·의원 찾기 API 항목. times 예: d1=("0900", 1800), d8=("0900", 1300)"""
+    it = {"dutyName": name, "dutyTel1": tel}
+    for key, (s, e) in times.items():
+        it[f"dutyTime{key[1:]}s"], it[f"dutyTime{key[1:]}c"] = s, e
+    return it
+
+
+WEEKDAYS = {f"d{d}": ("0900", 1800) for d in range(1, 6)}  # 월~금 09:00~18:00
+
+
+def kst(y, m, d, hh, mm=0):
+    return datetime(y, m, d, hh, mm, tzinfo=KST)
+
+
 def clear_caches():
     hira._cache.clear()
     egen._cache.update(at=0.0, items=[])
+    hours.clear_caches()
+
+
+def set_holidays(*days):
+    """공휴일 API를 부르지 않도록 캐시에 미리 넣어 둔다."""
+    for year in {d.year for d in days} | {2026}:
+        hours._holiday_cache[year] = (time.time(), {d for d in days if d.year == year})
 
 
 class FetchItemsTests(unittest.TestCase):
-    """_common.fetch_items: 공공 API 응답을 항상 list로, 실패는 빈 list로."""
+    """_common.fetch_items: 결과는 항상 list, 0건은 [], 실패는 None."""
 
     URL = "https://example.test/api"
 
@@ -66,7 +91,7 @@ class FetchItemsTests(unittest.TestCase):
         self.assertEqual(_common.fetch_items(self.URL, "KEY", {}), [{"a": 1}])
 
     @mock.patch("backend.tools._common.requests.get")
-    def test_no_results(self, get):
+    def test_no_results_is_empty_list(self, get):
         for empty in ("", None, {}, {"item": []}):  # 0건일 때 API가 주는 여러 모양
             with self.subTest(items=empty):
                 get.return_value = api_response(empty)
@@ -81,18 +106,18 @@ class FetchItemsTests(unittest.TestCase):
     @mock.patch("backend.tools._common.requests.get")
     def test_empty_key_skips_request(self, get):
         with self.assertLogs("backend.tools._common", logging.WARNING):
-            self.assertEqual(_common.fetch_items(self.URL, "", {}), [])
+            self.assertIsNone(_common.fetch_items(self.URL, "", {}))
         get.assert_not_called()
 
     @mock.patch("backend.tools._common.requests.get")
     def test_error_result_code(self, get):
         get.return_value = api_response(None, code="30", msg="SERVICE_KEY_IS_NOT_REGISTERED_ERROR")
         with self.assertLogs("backend.tools._common", logging.WARNING) as logs:
-            self.assertEqual(_common.fetch_items(self.URL, "KEY", {}), [])
+            self.assertIsNone(_common.fetch_items(self.URL, "KEY", {}))
         self.assertIn("30", "".join(logs.output))
 
     @mock.patch("backend.tools._common.requests.get")
-    def test_network_failures_return_empty_without_leaking_key(self, get):
+    def test_network_failures_without_leaking_key(self, get):
         secret = "SECRET-KEY-123=="
         for exc in (requests.Timeout(f"timeout ?serviceKey={secret}"),
                     requests.ConnectionError(f"refused ?serviceKey={secret}"),
@@ -100,7 +125,7 @@ class FetchItemsTests(unittest.TestCase):
             with self.subTest(exc=type(exc).__name__):
                 get.side_effect = exc
                 with self.assertLogs("backend.tools._common", logging.WARNING) as logs:
-                    self.assertEqual(_common.fetch_items(self.URL, secret, {}), [])
+                    self.assertIsNone(_common.fetch_items(self.URL, secret, {}))
                 self.assertNotIn(secret, "".join(logs.output))
 
     @mock.patch("backend.tools._common.requests.get")
@@ -110,7 +135,7 @@ class FetchItemsTests(unittest.TestCase):
         resp.json.side_effect = ValueError("not json")  # 예: XML 오류 페이지
         get.return_value = resp
         with self.assertLogs("backend.tools._common", logging.WARNING):
-            self.assertEqual(_common.fetch_items(self.URL, "KEY", {}), [])
+            self.assertIsNone(_common.fetch_items(self.URL, "KEY", {}))
 
 
 class HaversineTests(unittest.TestCase):
@@ -133,9 +158,11 @@ class HiraSearchTests(unittest.TestCase):
 
     def setUp(self):
         clear_caches()
-        patcher = mock.patch("backend.tools.hira.fetch_items")
-        self.fetch = patcher.start()
-        self.addCleanup(patcher.stop)
+        p1 = mock.patch("backend.tools.hira.fetch_items")
+        p2 = mock.patch("backend.tools.hours.lookup_schedules", side_effect=lambda recs: [None] * len(recs))
+        self.fetch, self.lookup = p1.start(), p2.start()
+        self.addCleanup(p1.stop)
+        self.addCleanup(p2.stop)
 
     def test_sorted_by_distance_and_limited(self):
         # API 결과는 거리순이 아니다(실측) → 직접 정렬해야 한다
@@ -147,8 +174,25 @@ class HiraSearchTests(unittest.TestCase):
         self.fetch.return_value = [hira_item("튼튼정형외과의원", "320.7", phone="02-123-4567")]
         out = hira.search_hospitals("정형외과", *CITY_HALL)
         self.assertEqual(out, [{"name": "튼튼정형외과의원", "dept": "정형외과", "distance_m": 320,
-                                "is_open": True, "phone": "02-123-4567"}])
+                                "is_open": None, "phone": "02-123-4567"}])
         HospitalOut(**out[0])  # schemas.py 계약 위반이면 예외
+
+    def test_hours_looked_up_once_for_top_results_only(self):
+        self.fetch.return_value = [hira_item(f"병원{d}", d) for d in (300, 100, 200, 900)]
+        hira.search_hospitals("내과", *CITY_HALL, top=3)
+        self.lookup.assert_called_once()  # 병원마다 부르지 않고 한 번에
+        records = self.lookup.call_args.args[0]
+        self.assertEqual([r["name"] for r in records], ["병원100", "병원200", "병원300"])
+        self.assertEqual(set(records[0]), {"name", "phone", "addr", "ykiho"})
+
+    def test_is_open_comes_from_schedule(self):
+        open_now, closed = Schedule({1: (0, 2400)}), Schedule({})
+        self.lookup.side_effect = lambda recs: [open_now, closed, None][:len(recs)]
+        self.fetch.return_value = [hira_item("A", 1), hira_item("B", 2), hira_item("C", 3)]
+        verdict = {id(open_now): True, id(closed): False}
+        with mock.patch("backend.tools.hours.is_open", side_effect=lambda s: verdict.get(id(s))):
+            out = hira.search_hospitals("내과", *CITY_HALL, top=3)
+        self.assertEqual([h["is_open"] for h in out], [True, False, None])
 
     def test_request_params(self):
         self.fetch.return_value = [hira_item("A", 10)] * 5
@@ -192,6 +236,12 @@ class HiraSearchTests(unittest.TestCase):
         hira.search_hospitals("내과", *CITY_HALL, top=5)
         self.assertEqual(self.fetch.call_count, 1)
 
+    def test_api_failure_does_not_retry_wider(self):
+        self.fetch.return_value = None  # 타임아웃 등 실패
+        self.assertEqual(hira.search_hospitals("내과", *CITY_HALL), [])
+        self.assertEqual(self.fetch.call_count, 1)  # 실패는 '결과 부족'이 아니므로 반경을 넓히지 않음
+        self.lookup.assert_not_called()
+
     def test_distance_fallback_and_missing_coords(self):
         self.fetch.return_value = [
             {"yadmNm": "거리필드없음", "telno": "02", "XPos": "126.9780", "YPos": "37.5665"},
@@ -204,21 +254,210 @@ class HiraSearchTests(unittest.TestCase):
         self.fetch.return_value = [hira_item("A", 10, phone="")] * 5
         self.assertIsNone(hira.search_hospitals("내과", *CITY_HALL)[0]["phone"])
 
-    def test_cache_hit_skips_api(self):
+    def test_cache_hit_skips_api_but_recomputes_is_open(self):
         self.fetch.return_value = [hira_item(f"병원{i}", i) for i in range(5)]
-        # 캐시는 좌표를 소수 3자리(약 100m)로 묶는다. 반올림 경계를 피한 두 점(약 10m 차이)
-        first = hira.search_hospitals("내과", 37.5661, 126.9781)
-        second = hira.search_hospitals("내과", 37.5662, 126.9782)
-        self.assertEqual(first, second)
+        with mock.patch("backend.tools.hours.is_open", side_effect=[True] * 5 + [False] * 5):
+            # 캐시는 좌표를 소수 3자리(약 100m)로 묶는다. 반올림 경계를 피한 두 점(약 10m 차이)
+            first = hira.search_hospitals("내과", 37.5661, 126.9781)
+            second = hira.search_hospitals("내과", 37.5662, 126.9782)
         self.assertEqual(self.fetch.call_count, 1)
+        self.assertEqual(self.lookup.call_count, 1)
+        self.assertTrue(all(h["is_open"] for h in first))       # 진료시간표는 캐시해도
+        self.assertFalse(any(h["is_open"] for h in second))     # is_open은 매번 현재 시각으로
         hira.search_hospitals("외과", 37.5661, 126.9781)  # 진료과가 다르면 새로 조회
         self.assertEqual(self.fetch.call_count, 2)
 
     def test_failure_is_not_cached(self):
-        self.fetch.return_value = []  # API 실패 → 빈 결과
+        self.fetch.return_value = None  # API 실패
         self.assertEqual(hira.search_hospitals("내과", *CITY_HALL), [])
         self.fetch.return_value = [hira_item("A", 10)] * 5
         self.assertEqual(len(hira.search_hospitals("내과", *CITY_HALL)), 5)
+
+
+class IsOpenTests(unittest.TestCase):
+    """hours.is_open: 진료시간표 + 현재 시각(+ 공휴일) → True/False/None."""
+
+    def setUp(self):
+        clear_caches()
+        # 2026-11-16(월), 2026-11-17(화)는 평일, 2026-12-25(금)는 공휴일
+        set_holidays(date(2026, 12, 25))
+        self.weekday = hours._schedule_from_nmc(nmc_item("A", "02", **WEEKDAYS))
+
+    def test_weekday_hours(self):
+        for when, expected in [(kst(2026, 11, 16, 10), True),
+                               (kst(2026, 11, 16, 8, 59), False),
+                               (kst(2026, 11, 16, 9, 0), True),     # 시작 시각 포함
+                               (kst(2026, 11, 16, 18, 0), False),   # 종료 시각은 끝난 것
+                               (kst(2026, 11, 21, 10), False),      # 토요일: 시간표 없음 → 휴진
+                               (kst(2026, 11, 22, 10), False)]:     # 일요일
+            with self.subTest(when=when):
+                self.assertIs(hours.is_open(self.weekday, when), expected)
+
+    def test_no_schedule_is_unknown(self):
+        self.assertIsNone(hours.is_open(None, kst(2026, 11, 16, 10)))
+
+    def test_timezone_converted_to_kst(self):
+        utc_1am = datetime(2026, 11, 16, 1, 0, tzinfo=timezone.utc)  # = 한국 10:00
+        self.assertTrue(hours.is_open(self.weekday, utc_1am))
+
+    def test_holiday_short_hours(self):
+        # 공휴일 단축 진료 (평일 18시까지, 공휴일 13시까지)
+        s = hours._schedule_from_nmc(nmc_item("A", "02", **WEEKDAYS, d8=("0900", 1300)))
+        self.assertTrue(hours.is_open(s, kst(2026, 12, 25, 12)))
+        self.assertFalse(hours.is_open(s, kst(2026, 12, 25, 14)))
+        self.assertTrue(hours.is_open(s, kst(2026, 12, 24, 14)))  # 전날(평일)은 평일 시간
+
+    def test_holiday_full_hours(self):
+        s = hours._schedule_from_nmc(nmc_item("A", "02", **WEEKDAYS, d8=("0900", 1800)))
+        self.assertTrue(hours.is_open(s, kst(2026, 12, 25, 17)))
+
+    def test_holiday_without_hours_is_closed(self):
+        # 금요일이라 평일 시간은 있지만, 공휴일 시간이 없으면 휴진
+        self.assertFalse(hours.is_open(self.weekday, kst(2026, 12, 25, 10)))
+
+    def test_hira_detail_holiday(self):
+        base = {f"trmt{d}Start": "0900" for d in ("Mon", "Tue", "Wed", "Thu", "Fri")}
+        base.update({f"trmt{d}End": 1800 for d in ("Mon", "Tue", "Wed", "Thu", "Fri")})
+        closed = hours._schedule_from_hira({**base, "noTrmtHoli": "휴진"})
+        unknown = hours._schedule_from_hira({**base, "noTrmtHoli": "오전진료"})
+        self.assertFalse(hours.is_open(closed, kst(2026, 12, 25, 10)))
+        self.assertIsNone(hours.is_open(unknown, kst(2026, 12, 25, 10)))  # 공휴일 진료 여부 모름
+        self.assertTrue(hours.is_open(unknown, kst(2026, 11, 16, 10)))    # 평일은 정상 판단
+
+    def test_overnight_hours(self):
+        s = Schedule({2: (2200, 600)})  # 화요일 22:00 ~ 수요일 06:00
+        self.assertTrue(hours.is_open(s, kst(2026, 11, 17, 23)))   # 화 23시
+        self.assertTrue(hours.is_open(s, kst(2026, 11, 18, 3)))    # 수 03시 (전날부터 이어짐)
+        self.assertFalse(hours.is_open(s, kst(2026, 11, 18, 7)))   # 수 07시
+        self.assertFalse(hours.is_open(s, kst(2026, 11, 17, 21)))  # 화 21시
+
+    def test_time_parsing(self):
+        for raw, expected in [("0930", 930), (1830, 1830), ("2400", 2400), (" 900 ", 900),
+                              ("2460", None), ("2500", None), ("abc", None), (None, None), ("", None)]:
+            with self.subTest(raw=raw):
+                self.assertEqual(hours._hhmm(raw), expected)
+
+    def test_nmc_without_any_hours(self):
+        self.assertIsNone(hours._schedule_from_nmc(nmc_item("시간없음", "02")))
+
+
+class HolidayTests(unittest.TestCase):
+    def setUp(self):
+        clear_caches()
+        p = mock.patch("backend.tools.hours.fetch_items")
+        self.fetch = p.start()
+        self.addCleanup(p.stop)
+
+    def test_parses_and_caches(self):
+        self.fetch.return_value = [
+            {"locdate": 20261225, "dateName": "기독탄신일", "isHoliday": "Y"},
+            {"locdate": 20260303, "dateName": "임시공휴일", "isHoliday": "Y"},
+            {"locdate": 20260101, "dateName": "기념일", "isHoliday": "N"},
+        ]
+        self.assertTrue(hours.is_holiday(date(2026, 12, 25)))
+        self.assertTrue(hours.is_holiday(date(2026, 3, 3)))   # 임시공휴일 포함
+        self.assertFalse(hours.is_holiday(date(2026, 1, 1)))  # isHoliday=N
+        self.assertFalse(hours.is_holiday(date(2026, 11, 16)))
+        self.assertEqual(self.fetch.call_count, 1)  # 1년치를 한 번만
+        self.assertEqual(self.fetch.call_args.args[2]["solYear"], 2026)
+
+    def test_failure_treated_as_weekday_and_retried(self):
+        self.fetch.return_value = None
+        with self.assertLogs("backend.tools.hours", logging.WARNING):
+            self.assertFalse(hours.is_holiday(date(2026, 12, 25)))
+        self.fetch.return_value = [{"locdate": 20261225, "isHoliday": "Y"}]
+        self.assertTrue(hours.is_holiday(date(2026, 12, 25)))
+
+
+class LookupSchedulesTests(unittest.TestCase):
+    """hours.lookup_schedules: 병원 N곳의 진료시간을 몇 번의 호출로 찾는지."""
+
+    JUNG = "서울특별시 중구 세종대로 1"
+    JONGNO = "서울특별시 종로구 종로 1"
+
+    def setUp(self):
+        clear_caches()
+        self.regions = {
+            ("서울특별시", "중구"): [nmc_item("중구A의원", "02-111-1111", **WEEKDAYS),
+                                    nmc_item("중구B의원", "02-222-2222", **WEEKDAYS)],
+            ("서울특별시", "종로구"): [nmc_item("종로C의원", "02-333-3333", **WEEKDAYS)],
+        }
+        self.details = {"Y-없는병원": [{"trmtMonStart": "0900", "trmtMonEnd": 1800}], "Y-상세도없음": []}
+        p = mock.patch("backend.tools.hours.fetch_items", side_effect=self._fake_fetch)
+        self.fetch = p.start()
+        self.addCleanup(p.stop)
+
+    def _fake_fetch(self, url, key, params, timeout=5):
+        if url == hours.NMC_LIST:
+            return self.regions.get((params["Q0"], params["Q1"]), [])
+        if url == hours.HIRA_DETAIL:
+            return self.details.get(params["ykiho"], [])
+        raise AssertionError(url)
+
+    def calls(self, url):
+        return [c for c in self.fetch.call_args_list if c.args[0] == url]
+
+    def rec(self, name, phone, addr, ykiho=None):
+        return {"name": name, "phone": phone, "addr": addr, "ykiho": ykiho or f"Y-{name}"}
+
+    def test_one_call_per_region_not_per_hospital(self):
+        recs = [self.rec("중구A의원", "02-111-1111", self.JUNG),
+                self.rec("중구B의원", "02-222-2222", self.JUNG),
+                self.rec("종로C의원", "02-333-3333", self.JONGNO),
+                self.rec("중구A의원", "02-111-1111", self.JUNG)]
+        out = hours.lookup_schedules(recs)
+        self.assertTrue(all(out))
+        self.assertEqual(len(self.calls(hours.NMC_LIST)), 2)    # 병원 4곳, 시군구 2개 → 2번
+        self.assertEqual(len(self.calls(hours.HIRA_DETAIL)), 0)  # 다 찾았으니 상세조회 없음
+
+    def test_detail_only_for_unmatched(self):
+        recs = [self.rec("중구A의원", "02-111-1111", self.JUNG),
+                self.rec("없는병원", "02-999-0000", self.JUNG),
+                self.rec("상세도없음", "02-999-1111", self.JUNG)]
+        out = hours.lookup_schedules(recs)
+        self.assertIsNotNone(out[0])
+        self.assertEqual(out[1].days, {1: (900, 1800)})  # 2단계(심평원 상세)에서 찾음
+        self.assertIsNone(out[2])                         # 둘 다 없으면 정보 없음
+        detail_ids = sorted(c.args[2]["ykiho"] for c in self.calls(hours.HIRA_DETAIL))
+        self.assertEqual(detail_ids, sorted(["Y-없는병원", "Y-상세도없음"]))  # 찾은 병원(중구A)은 조회 안 함
+
+    def test_second_lookup_uses_cache(self):
+        recs = [self.rec("중구A의원", "02-111-1111", self.JUNG),
+                self.rec("상세도없음", "02-999-1111", self.JUNG)]
+        hours.lookup_schedules(recs)
+        before = self.fetch.call_count
+        hours.lookup_schedules(recs)
+        self.assertEqual(self.fetch.call_count, before)  # '정보 없음'도 캐시되어 재호출 없음
+
+    def test_matching_rules(self):
+        index = hours._region_index(("서울특별시", "중구"))
+        self.assertEqual(hours._match(index, "다른이름", "02)111-1111")["dutyName"], "중구A의원")  # 전화번호 형식 무관
+        self.assertEqual(hours._match(index, "중구B의원", None)["dutyName"], "중구B의원")         # 전화 없으면 이름
+        self.assertIsNone(hours._match(index, "모르는곳", "02-000-0000"))
+
+    def test_ambiguous_name_is_not_guessed(self):
+        self.regions[("서울특별시", "중구")] += [nmc_item("같은이름의원", "02-500-0001", **WEEKDAYS),
+                                                nmc_item("같은이름의원", "02-500-0002", **WEEKDAYS)]
+        index = hours._region_index(("서울특별시", "중구"))
+        self.assertIsNone(hours._match(index, "같은이름의원", "02-777-7777"))
+        self.assertIsNotNone(hours._match(index, "같은이름의원", "02-500-0002"))
+
+    def test_region_failure_falls_back_and_is_retried(self):
+        self.regions = {}
+        self.fetch.side_effect = lambda url, key, params, timeout=5: (
+            None if url == hours.NMC_LIST else self._fake_fetch(url, key, params))
+        out = hours.lookup_schedules([self.rec("없는병원", "02", self.JUNG)])
+        self.assertIsNotNone(out[0])  # 1단계 실패 → 2단계로 찾음
+        self.assertNotIn(("서울특별시", "중구"), hours._region_cache)  # 실패는 캐시 안 함
+
+    def test_region_from_address(self):
+        for addr, expected in [("서울특별시 중구 세종대로 1", ("서울특별시", "중구")),
+                               ("경기도 수원시 권선구 효원로 1", ("경기도", "수원시")),
+                               ("경기도 양평군 양평읍 1", ("경기도", "양평군")),
+                               ("세종특별자치시 새롬중앙로 55", ("세종특별자치시", "")),
+                               ("", None), (None, None)]:
+            with self.subTest(addr=addr):
+                self.assertEqual(hours._region(addr), expected)
 
 
 class EgenSearchTests(unittest.TestCase):
@@ -265,7 +504,7 @@ class EgenSearchTests(unittest.TestCase):
         self.assertEqual(self.fetch.call_count, 1)
 
     def test_failure_is_not_cached(self):
-        self.fetch.return_value = []
+        self.fetch.return_value = None
         self.assertEqual(egen.search_emergency(*CITY_HALL), [])
         self.fetch.return_value = [er_item("A", 37.5670, 126.9785)]
         self.assertEqual(len(egen.search_emergency(*CITY_HALL)), 1)
@@ -282,14 +521,28 @@ class SearchNodeTests(unittest.TestCase):
     @mock.patch("backend.tools.egen.search_emergency")
     @mock.patch("backend.tools.hira.search_hospitals")
     def test_returns_only_hospitals_field(self, hira_search, er_search):
-        hira_search.return_value = [{"name": "병원", "dept": "정형외과", "distance_m": 100, "is_open": True, "phone": None}]
+        hira_search.return_value = [{"name": "병원", "dept": "정형외과", "distance_m": 100, "is_open": None, "phone": None}]
         er_search.return_value = [{"name": "응급실", "dept": "응급의학과", "distance_m": 900, "is_open": True, "phone": None}]
         state = dict(self.STATE)
         out = search.search_hospitals(state)
         self.assertEqual(list(out), ["hospitals"])
-        self.assertEqual([h["name"] for h in out["hospitals"]], ["병원", "응급실"])
+        self.assertEqual([h["name"] for h in out["hospitals"]], ["병원", "응급실"])  # 병원 먼저, 응급실 뒤
         hira_search.assert_called_once_with("정형외과", *CITY_HALL)  # Top-1 진료과로 검색
         self.assertEqual(state, self.STATE)  # 입력 State는 건드리지 않는다
+
+    @mock.patch("backend.tools.egen.search_emergency")
+    @mock.patch("backend.tools.hira.search_hospitals")
+    def test_runs_both_searches_concurrently(self, hira_search, er_search):
+        def slow(result):
+            def run(*_):
+                time.sleep(0.3)
+                return result
+            return run
+        hira_search.side_effect = slow([])
+        er_search.side_effect = slow([])
+        t = time.time()
+        search.search_hospitals(dict(self.STATE))
+        self.assertLess(time.time() - t, 0.55)  # 순서대로면 0.6초 이상
 
     @mock.patch("backend.tools.egen.search_emergency")
     @mock.patch("backend.tools.hira.search_hospitals")
@@ -315,6 +568,8 @@ class LiveApiTests(unittest.TestCase):
         self.assertTrue(all(h["distance_m"] < 3000 for h in out))
         for h in out:
             HospitalOut(**h)
+        known = [h for h in out if h["is_open"] is not None]
+        self.assertGreaterEqual(len(known), 3, f"진료시간을 찾은 병원이 너무 적음: {out}")
 
     def test_egen_live(self):
         out = egen.search_emergency(*CITY_HALL)
@@ -322,6 +577,12 @@ class LiveApiTests(unittest.TestCase):
         self.assertLess(out[0]["distance_m"], 5000)
         for h in out:
             HospitalOut(**h)
+
+    def test_holidays_live(self):
+        days = hours.holidays_of(2026)
+        self.assertIsNotNone(days, "특일 정보 API 실패: 활용신청 확인")
+        self.assertIn(date(2026, 12, 25), days)
+        self.assertIn(date(2026, 10, 5), days)  # 대체공휴일(개천절)
 
 
 if __name__ == "__main__":

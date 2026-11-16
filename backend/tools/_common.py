@@ -22,15 +22,17 @@ def haversine_m(lat1: float, lng1: float, lat2, lng2) -> Optional[int]:
     return int(2 * 6371000 * asin(sqrt(a)))
 
 
-def fetch_items(url: str, key: str, params: Dict, timeout: float = 5) -> List[Dict]:
+def fetch_items(url: str, key: str, params: Dict, timeout: float = 5) -> Optional[List[Dict]]:
     """OpenAPI를 호출해 response.body.items.item 을 항상 list로 돌려준다.
 
-    외부 API가 막히거나 느려도 데모가 멈추지 않도록, 실패하면 예외 대신
-    빈 리스트를 반환하고 원인만 로그로 남긴다. 인증키는 로그에 남기지 않는다.
+    결과가 0건이면 [], 호출 자체가 실패하면 None.
+    (둘을 구분해야 '0건'은 캐시하고 '실패'는 다음에 다시 시도할 수 있다)
+    외부 API가 막히거나 느려도 데모가 멈추지 않도록 예외는 던지지 않고
+    원인만 로그로 남긴다. 인증키는 로그에 남기지 않는다.
     """
     if not key:
         logger.warning("API 키가 비어 있음 (.env 확인): %s", url)
-        return []
+        return None
     # Decoding 키에는 '%'가 없다. '%'가 있으면 Encoding 키를 넣은 것이므로
     # 풀어서 쓴다 (그대로 params로 넘기면 이중 인코딩되어 인증 실패).
     if "%" in key:
@@ -43,16 +45,16 @@ def fetch_items(url: str, key: str, params: Dict, timeout: float = 5) -> List[Di
     except requests.RequestException as e:
         # 예외 메시지에는 serviceKey가 포함된 URL이 들어가므로 종류만 남긴다
         logger.warning("API 호출 실패 (%s): %s", type(e).__name__, url)
-        return []
+        return None
     except ValueError:
         logger.warning("API가 JSON이 아닌 응답을 반환: %s", url)
-        return []
+        return None
 
     response = data.get("response") or {}
     header = response.get("header") or {}
     if header.get("resultCode") != "00":
         logger.warning("API 오류 응답 (%s %s): %s", header.get("resultCode"), header.get("resultMsg"), url)
-        return []
+        return None
 
     items = (response.get("body") or {}).get("items") or {}
     items = items.get("item", []) if isinstance(items, dict) else []

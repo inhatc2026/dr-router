@@ -20,7 +20,7 @@ def _er_list() -> List[Dict]:
     items = fetch_items(ER_LIST, EGEN_API_KEY, {"pageNo": 1, "numOfRows": 1000}, timeout=10)
     if items:  # 실패(빈 결과)는 캐시하지 않고 다음 호출 때 다시 시도
         _cache.update(at=time.time(), items=items)
-    return items
+    return items or []
 
 
 def search_emergency(lat: float, lng: float, top: int = 3) -> List[Dict]:
