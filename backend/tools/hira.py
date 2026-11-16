@@ -1,10 +1,11 @@
 """심평원 병원정보 OpenAPI (소유자: 최건)"""
 import logging
+import sqlite3
 import time
 from typing import Dict, List, Optional, Tuple
 
 from backend.config import HIRA_API_KEY
-from backend.tools import hours
+from backend.tools import hospital_db, hours
 from backend.tools._common import fetch_items, haversine_m
 
 logger = logging.getLogger(__name__)
@@ -48,7 +49,8 @@ def search_hospitals(dept: str, lat: float, lng: float, top: int = 5) -> List[Di
       is_open: True(진료중) / False(휴진·진료시간 밖) / None(정보 없음)
     지원하지 않는 진료과이거나 API 호출에 실패하면 빈 리스트.
 
-    API 호출: 병원 목록 1~2번 + 진료시간 (시군구 수)번 — 병원 수만큼 부르지 않는다.
+    병원 DB(hospital_db.py)가 있으면 DB에서 찾는다 → API 호출 0번, 수 ms.
+    없으면 API로 찾는다 → 병원 목록 1~2번 + 진료시간 (시군구 수)번, 3~16초.
     """
     dept = ALIASES.get(dept, dept)
     code = DGSBJT.get(dept)
@@ -57,6 +59,13 @@ def search_hospitals(dept: str, lat: float, lng: float, top: int = 5) -> List[Di
         return []
     if lat is None or lng is None:
         return []
+
+    if hospital_db.available():
+        try:
+            rows = _search_db(code, dept, lat, lng, top)
+            return [{**h, "is_open": hours.is_open(schedule)} for h, schedule in rows]
+        except sqlite3.Error as e:  # DB 파일이 깨졌으면 API로 대신 찾는다
+            logger.warning("병원 DB 검색 실패 (%s) — API로 검색", e)
 
     cache_key = (code, round(lat, 3), round(lng, 3), top)  # 소수 3자리 ≈ 100m
     cached = _cache.get(cache_key)
@@ -68,6 +77,18 @@ def search_hospitals(dept: str, lat: float, lng: float, top: int = 5) -> List[Di
             _cache[cache_key] = (time.time(), rows)
 
     return [{**h, "is_open": hours.is_open(schedule)} for h, schedule in rows]
+
+
+DB_RADII = (2000, 20000, 50000)  # DB는 빠르니 시골까지 넉넉히
+
+
+def _search_db(code: str, dept: str, lat: float, lng: float, top: int):
+    found = []
+    for radius in DB_RADII:
+        found = hospital_db.search(code, lat, lng, radius, top)
+        if len(found) >= top:
+            break
+    return [({**h, "dept": dept}, schedule) for h, schedule in found]
 
 
 def _search(code: str, dept: str, lat: float, lng: float, top: int):

@@ -5,25 +5,27 @@ is_open 값
   False : 오늘 휴진이거나 진료시간 밖
   None  : 진료시간 정보 없음
 
-진료시간 출처 (위에서 못 찾은 병원만 다음 단계로 넘어간다)
-  1) 국립중앙의료원 병·의원 찾기 — 시군구 전체 목록을 한 번에 받아(캐시) 전화번호·이름으로 연결.
-     요일별 + 공휴일 진료시간이 있다.
-  2) 심평원 의료기관별상세정보 — 1)에서 못 찾은 병원만 병원 ID(ykiho)로 조회(병렬, 캐시).
-     요일별 진료시간은 있지만 공휴일은 휴진 여부만 있다.
+진료시간 출처
+  1) 국립중앙의료원 병·의원 찾기 — 요일별 + 공휴일 진료시간.
+  2) 심평원 의료기관별상세정보 — 요일별 진료시간 + 점심시간. 공휴일은 휴진 여부 문장만 있다.
+  병원 DB(hospital_db.py)를 만들어 두면 두 출처를 미리 합쳐 두므로 요청 때 API를 부르지 않는다.
+  DB가 없으면 lookup_schedules()가 API로 찾는다(1→2 순서, 1에서 못 찾은 병원만 2로).
 공휴일 판단은 한국천문연구원 특일 정보(임시공휴일 포함)를 연 단위로 받아 캐시한다.
 
-API 호출 수는 병원 수(N)에 비례하지 않는다:
+API 경로의 호출 수는 병원 수(N)에 비례하지 않는다:
   (서로 다른 시군구 수) + (1단계에서 못 찾은 병원 수), 그나마 캐시에 있으면 0.
 
 한계
-  - 점심시간은 반영하지 않는다(1단계 출처에는 자유 문장으로만 있음).
+  - 점심시간은 2) 출처에 값이 있을 때만 반영한다.
   - 진료시간 정보가 있는데 그 요일·공휴일 시간이 비어 있으면 휴진으로 본다.
   - 공휴일 API가 실패하면 평일로 간주한다.
 """
+import json
 import logging
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 
@@ -53,6 +55,18 @@ _HIRA_DAYS = {1: "Mon", 2: "Tue", 3: "Wed", 4: "Thu", 5: "Fri", 6: "Sat", 7: "Su
 class Schedule:
     days: Dict[int, Tuple[int, int]]  # 요일 번호 → (시작, 종료) HHMM 정수. 예: (930, 1830)
     holiday_known: bool = True        # False면 공휴일 진료 여부를 모름
+    lunch: Dict[int, Tuple[int, int]] = field(default_factory=dict)  # 요일 번호 → 점심시간
+
+    def to_json(self) -> str:
+        return json.dumps({"days": self.days, "holiday_known": self.holiday_known, "lunch": self.lunch})
+
+    @staticmethod
+    def from_json(text: Optional[str]) -> Optional["Schedule"]:
+        if not text:
+            return None
+        d = json.loads(text)
+        to_days = lambda m: {int(k): tuple(v) for k, v in (m or {}).items()}  # noqa: E731
+        return Schedule(to_days(d.get("days")), bool(d.get("holiday_known", True)), to_days(d.get("lunch")))
 
 
 _region_cache: Dict[Tuple[str, str], Tuple[float, Tuple[Dict, Dict]]] = {}
@@ -125,6 +139,13 @@ def _region_index(region: Tuple[str, str]):
         return None
     if len(items) >= NMC_ROWS:
         logger.warning("%s %s 병·의원이 %s곳 이상 — 일부 누락", q0, q1, NMC_ROWS)
+    index = build_index(items)
+    _region_cache[region] = (time.time(), index)
+    return index
+
+
+def build_index(items: Iterable[Dict]) -> Tuple[Dict, Dict]:
+    """병·의원 찾기 항목들 → (전화번호별, 이름별) 찾아보기 표. _match()에서 쓴다."""
     by_tel: Dict[str, List[Dict]] = {}
     by_name: Dict[str, List[Dict]] = {}
     for it in items:
@@ -132,9 +153,7 @@ def _region_index(region: Tuple[str, str]):
         if len(tel) >= 7:
             by_tel.setdefault(tel, []).append(it)
         by_name.setdefault(it.get("dutyName"), []).append(it)
-    index = (by_tel, by_name)
-    _region_cache[region] = (time.time(), index)
-    return index
+    return by_tel, by_name
 
 
 def _match(index, name, phone) -> Optional[Dict]:
@@ -172,6 +191,12 @@ def _schedule_from_nmc(it: Dict) -> Optional[Schedule]:
     return Schedule(days) if days else None
 
 
+# 공휴일 안내 문장 중 '하루 종일 쉰다'는 뜻으로 확실한 것만 (공백 제거 후 비교).
+# '오후 2시 이후 휴진'처럼 일부만 쉬는 문장은 시간을 알 수 없으므로 '모름'으로 둔다.
+_HOLIDAY_CLOSED = {"휴진", "전부휴진", "종일휴진", "전일휴진", "휴무", "전부휴무", "종일휴무", "휴일",
+                   "공휴일휴진", "진료없음", "없음"}
+
+
 def _schedule_from_hira(it: Dict) -> Optional[Schedule]:
     days = {}
     for d, name in _HIRA_DAYS.items():
@@ -180,14 +205,44 @@ def _schedule_from_hira(it: Dict) -> Optional[Schedule]:
             days[d] = span
     if not days:
         return None
-    # 공휴일은 '휴진'·'휴무' 같은 문장만 있다. 쉰다고 적힌 경우만 확실하다.
-    holiday_closed = any(w in str(it.get("noTrmtHoli") or "") for w in ("휴진", "휴무", "없음"))
-    return Schedule(days, holiday_known=holiday_closed)
+    holiday_text = "".join(str(it.get("noTrmtHoli") or "").split())
+    lunch = {}
+    week, sat = _parse_lunch(it.get("lunchWeek")), _parse_lunch(it.get("lunchSat"))
+    for d in range(1, 6):
+        if week:
+            lunch[d] = week
+    if sat:
+        lunch[6] = sat
+    return Schedule(days, holiday_known=holiday_text in _HOLIDAY_CLOSED, lunch=lunch)
 
 
 def _span(start, end) -> Optional[Tuple[int, int]]:
     s, e = _hhmm(start), _hhmm(end)
-    return (s, e) if s is not None and e is not None else None
+    # 시작=종료(예: 일요일 '0'~'0')는 진료하지 않는 날로 적힌 것
+    return (s, e) if s is not None and e is not None and s != e else None
+
+
+_CLOCK = re.compile(r"(\d{1,2})\s*(?:시|:)\s*(?:(\d{1,2})\s*분?)?")
+
+
+def _parse_lunch(text) -> Optional[Tuple[int, int]]:
+    """'13시00분~14시00분', '12:30 ~ 13:30', '1시~2시' 같은 문장 → (1300, 1400). 못 읽으면 None."""
+    found = _CLOCK.findall(str(text or ""))
+    if len(found) < 2:
+        return None
+    times = []
+    for hour, minute in found[:2]:
+        h, m = int(hour), int(minute or 0)
+        if h < 7:  # '1시~2시'는 오후
+            h += 12
+        if h > 23 or m > 59:
+            return None
+        times.append(h * 100 + m)
+    start, end = times
+    # 점심시간으로 보기 어려운 값은 버린다 (예: 진료시간을 잘못 적은 경우)
+    if not (1000 <= start < end <= 1700 and end - start <= 300):
+        return None
+    return start, end
 
 
 def _hhmm(value) -> Optional[int]:
@@ -216,7 +271,8 @@ def is_open(schedule: Optional[Schedule], now: Optional[datetime] = None) -> Opt
         return None
     span = schedule.days.get(today)
     if span and _covers(span, t):
-        return True
+        lunch = schedule.lunch.get(today)
+        return not (lunch and lunch[0] <= t < lunch[1])
 
     # 전날 밤부터 이어지는 진료 (예: 22:00~06:00)
     yesterday = _day_key(schedule, now.date() - timedelta(days=1))
@@ -236,9 +292,7 @@ def _covers(span: Tuple[int, int], t: int) -> bool:
     start, end = span
     if start < end:
         return start <= t < end
-    if end < start:  # 자정을 넘기는 진료의 오늘 부분
-        return t >= start
-    return True  # 시작=종료는 24시간으로 본다
+    return t >= start  # 자정을 넘기는 진료(종료 < 시작)의 오늘 부분
 
 
 def is_holiday(d: date) -> bool:

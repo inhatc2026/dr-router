@@ -7,19 +7,23 @@
     PowerShell:  $env:LIVE_API="1"; python -X utf8 -m unittest eval.test_hospital_search -v
     Git Bash:    LIVE_API=1 python -X utf8 -m unittest eval.test_hospital_search -v
 """
+import csv
+import io
 import logging
 import os
+import tempfile
 import time
 import unittest
-from datetime import date, datetime, timedelta, timezone
+import zipfile
+from datetime import date, datetime, timezone
 from unittest import mock
 
 import requests
 
 from backend.agent.nodes import search
 from backend.api.schemas import HospitalOut
-from backend.tools import _common, egen, hira, hours
-from backend.tools.hours import KST, Schedule
+from backend.tools import _common, egen, hira, hospital_db, hours
+from backend.tools.hours import HOLIDAY_KEY, KST, Schedule
 
 CITY_HALL = (37.5665, 126.9780)  # 서울시청
 
@@ -160,9 +164,10 @@ class HiraSearchTests(unittest.TestCase):
         clear_caches()
         p1 = mock.patch("backend.tools.hira.fetch_items")
         p2 = mock.patch("backend.tools.hours.lookup_schedules", side_effect=lambda recs: [None] * len(recs))
-        self.fetch, self.lookup = p1.start(), p2.start()
-        self.addCleanup(p1.stop)
-        self.addCleanup(p2.stop)
+        p3 = mock.patch("backend.tools.hospital_db.available", return_value=False)  # API 경로를 검사
+        self.fetch, self.lookup, _ = p1.start(), p2.start(), p3.start()
+        for p in (p1, p2, p3):
+            self.addCleanup(p.stop)
 
     def test_sorted_by_distance_and_limited(self):
         # API 결과는 거리순이 아니다(실측) → 직접 정렬해야 한다
@@ -340,6 +345,45 @@ class IsOpenTests(unittest.TestCase):
     def test_nmc_without_any_hours(self):
         self.assertIsNone(hours._schedule_from_nmc(nmc_item("시간없음", "02")))
 
+    def test_zero_to_zero_means_closed(self):
+        # 분기 파일·상세정보는 쉬는 요일을 '0'~'0'으로 적는다 (24시간 진료로 오해하면 안 됨)
+        s = hours._schedule_from_hira({"trmtMonStart": "900", "trmtMonEnd": "1800",
+                                       "trmtSunStart": "0", "trmtSunEnd": "0"})
+        self.assertEqual(set(s.days), {1})
+        self.assertFalse(hours.is_open(s, kst(2026, 11, 22, 12)))  # 일요일
+
+    def test_lunch_break(self):
+        s = hours._schedule_from_hira({"trmtMonStart": "900", "trmtMonEnd": "1800",
+                                       "trmtSatStart": "900", "trmtSatEnd": "1300",
+                                       "lunchWeek": "13시00분~14시00분", "lunchSat": "진료없음"})
+        self.assertTrue(hours.is_open(s, kst(2026, 11, 16, 12, 59)))
+        self.assertFalse(hours.is_open(s, kst(2026, 11, 16, 13, 30)))  # 점심시간
+        self.assertTrue(hours.is_open(s, kst(2026, 11, 16, 14, 0)))
+        self.assertNotIn(6, s.lunch)  # 토요일 '진료없음'은 점심시간이 아님
+
+    def test_lunch_parsing(self):
+        for text, expected in [("13시00분~14시00분", (1300, 1400)), ("12:30 ~ 13:30", (1230, 1330)),
+                               ("13:00 -14:00", (1300, 1400)), ("13시~14시", (1300, 1400)),
+                               ("1시~2시", (1300, 1400)), ("12시30분~1시30분", (1230, 1330)),
+                               ("진료없음", None), ("", None), (None, None),
+                               ("09:00~18:00", None)]:  # 점심시간으로 보기 어려운 값
+            with self.subTest(text=text):
+                self.assertEqual(hours._parse_lunch(text), expected)
+
+    def test_holiday_text_partial_closing_is_unknown(self):
+        base = {"trmtFriStart": "900", "trmtFriEnd": "1800"}
+        for text, known in [("전부 휴진", True), ("휴진", True), ("종일휴진", True), ("휴무", True),
+                            ("오후 2시 이후 휴진", False), ("오전 10시 진료 시작, 오후 2시 이후 휴진", False),
+                            ("진료", False), ("", False)]:
+            with self.subTest(text=text):
+                s = hours._schedule_from_hira({**base, "noTrmtHoli": text})
+                self.assertIs(s.holiday_known, known)
+
+    def test_schedule_json_round_trip(self):
+        s = Schedule({1: (900, 1800), 8: (900, 1300)}, holiday_known=False, lunch={1: (1300, 1400)})
+        self.assertEqual(Schedule.from_json(s.to_json()), s)
+        self.assertIsNone(Schedule.from_json(None))
+
 
 class HolidayTests(unittest.TestCase):
     def setUp(self):
@@ -458,6 +502,141 @@ class LookupSchedulesTests(unittest.TestCase):
                                ("", None), (None, None)]:
             with self.subTest(addr=addr):
                 self.assertEqual(hours._region(addr), expected)
+
+
+def write_fixture_zip(path):
+    """실제 분기 파일과 같은 칸 이름·인코딩(cp949)의 작은 zip을 만든다."""
+    def csv_bytes(header, rows):
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(header)
+        w.writerows(rows)
+        return buf.getvalue().encode("cp949")
+
+    hosp_header = ["암호화요양기호", "요양기관명", "종별코드명", "주소", "전화번호", "좌표(X)", "좌표(Y)"]
+    hosp = [  # 서울시청(37.5665, 126.9780) 기준
+        ["Y1", "가까운정형외과의원", "의원", "서울특별시 중구 세종대로 1", "02-111-1111", "126.9790", "37.5670"],
+        ["Y2", "조금먼정형외과의원", "의원", "서울특별시 중구 세종대로 2", "02-222-2222", "126.9900", "37.5700"],
+        ["Y3", "상세만있는의원", "의원", "서울특별시 종로구 종로 1", "02-333-3333", "126.9800", "37.5680"],
+        ["Y4", "시간없는의원", "의원", "서울특별시 종로구 종로 2", "02-444-4444", "126.9810", "37.5690"],
+        ["Y5", "먼내과의원", "의원", "서울특별시 강남구 강남대로 1", "02-555-5555", "127.0276", "37.4979"],
+        ["Y6", "좌표없는의원", "의원", "서울특별시 중구 세종대로 3", "02-666-6666", "", ""],
+    ]
+    days = ["일요일", "월요일", "화요일", "수요일", "목요일", "금요일", "토요일"]
+    detail_header = ["암호화요양기호", "요양기관명", "휴진안내_공휴일", "점심시간_평일", "점심시간_토요일"]
+    detail_header += [f"진료{k}시간_{d}" for d in days for k in ("시작", "종료")]
+    weekday_hours = ["0", "0"] + ["900", "1800"] * 5 + ["900", "1300"]
+    detail = [["Y1", "가까운정형외과의원", "전부 휴진", "13시00분~14시00분", ""] + weekday_hours,
+              ["Y3", "상세만있는의원", "휴진", "12:30~13:30", ""] + weekday_hours]
+    subj = [["Y1", "05"], ["Y2", "05"], ["Y3", "05"], ["Y4", "05"], ["Y5", "01"], ["Y6", "05"], ["Y1", "01"]]
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("1.병원정보서비스(2026.9.).csv", csv_bytes(hosp_header, hosp))
+        z.writestr("4.의료기관별상세정보서비스_02_세부정보(2026.9.).csv", csv_bytes(detail_header, detail))
+        z.writestr("5.의료기관별상세정보서비스_03_진료과목정보(2026.9.).csv",
+                   csv_bytes(["암호화요양기호", "진료과목코드"], subj))
+
+
+FIXTURE_NMC = [  # 병·의원 찾기: Y1·Y2만 연결된다 (Y1은 전화번호 형식이 달라도 연결)
+    {**nmc_item("가까운정형외과의원", "021111111", **WEEKDAYS, d8=("0900", 1300)), "dutyAddr": "서울특별시 중구 세종대로 1"},
+    {**nmc_item("조금먼정형외과의원", "02-222-2222", **WEEKDAYS), "dutyAddr": "서울특별시 중구 세종대로 2"},
+    {**nmc_item("다른동네의원", "02-999-9999", **WEEKDAYS), "dutyAddr": "부산광역시 중구 중앙대로 1"},
+]
+
+
+class HospitalDbTests(unittest.TestCase):
+    """hospital_db: 분기 파일 + 병·의원 찾기 → SQLite, 그리고 DB 검색."""
+
+    def setUp(self):
+        clear_caches()
+        set_holidays(date(2026, 12, 25))
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.zip_path = os.path.join(tmp.name, "fixture.zip")
+        self.db_path = os.path.join(tmp.name, "hospitals.sqlite")
+        write_fixture_zip(self.zip_path)
+        self.stats = hospital_db.build(self.zip_path, FIXTURE_NMC, self.db_path, version="테스트_20260930")
+        p = mock.patch.object(hospital_db, "DB_PATH", self.db_path)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_build_stats(self):
+        self.assertEqual(self.stats["hospitals"], 5)   # 좌표 없는 1곳 제외
+        self.assertEqual(self.stats["no_coords"], 1)
+        self.assertEqual(self.stats["nmc"], 2)         # Y1, Y2
+        self.assertEqual(self.stats["hira"], 1)        # Y3 (병·의원 찾기에 없음 → 심평원 세부정보)
+        self.assertEqual(self.stats["none"], 2)        # Y4, Y5
+        self.assertEqual(hospital_db.info()["hira_version"], "테스트_20260930")
+        self.assertFalse(os.path.exists(self.db_path + ".tmp"))
+
+    def test_search_filters_department_and_radius_sorted(self):
+        out = hospital_db.search("05", *CITY_HALL, radius_m=2000, limit=10)
+        self.assertEqual([h["name"] for h, _ in out], ["가까운정형외과의원", "상세만있는의원", "시간없는의원", "조금먼정형외과의원"])
+        self.assertEqual([h["name"] for h, _ in hospital_db.search("01", *CITY_HALL, 2000, 10)], ["가까운정형외과의원"])
+        far = hospital_db.search("01", *CITY_HALL, 20000, 10)
+        self.assertEqual([h["name"] for h, _ in far], ["가까운정형외과의원", "먼내과의원"])
+
+    def test_schedule_sources_are_merged(self):
+        out = {h["name"]: s for h, s in hospital_db.search("05", *CITY_HALL, 2000, 10)}
+        merged = out["가까운정형외과의원"]
+        self.assertEqual(merged.days[HOLIDAY_KEY], (900, 1300))   # 공휴일 시간은 병·의원 찾기에서
+        self.assertEqual(merged.lunch[1], (1300, 1400))           # 점심시간은 심평원 세부정보에서
+        self.assertTrue(out["상세만있는의원"].holiday_known)        # '휴진' → 공휴일 휴진 확실
+        self.assertEqual(out["상세만있는의원"].lunch[1], (1230, 1330))
+        self.assertIsNone(out["시간없는의원"])
+
+    def test_hira_uses_db_without_any_api_call(self):
+        with mock.patch("backend.tools.hira.fetch_items") as api, mock.patch("backend.tools.hours.fetch_items") as api2:
+            with mock.patch("backend.tools.hours.datetime") as dt:
+                dt.now.return_value = kst(2026, 11, 16, 13, 15)  # 월요일, 두 병원 모두 점심시간
+                out = hira.search_hospitals("정형외과", *CITY_HALL, top=3)
+        api.assert_not_called()
+        api2.assert_not_called()
+        self.assertEqual([(h["name"], h["dept"], h["is_open"]) for h in out],
+                         [("가까운정형외과의원", "정형외과", False),   # 점심시간
+                          ("상세만있는의원", "정형외과", False),       # 12:30~13:30 점심시간
+                          ("시간없는의원", "정형외과", None)])
+        for h in out:
+            HospitalOut(**h)
+
+    def test_hira_widens_radius_in_db(self):
+        out = hira.search_hospitals("내과", *CITY_HALL, top=2)
+        self.assertEqual([h["name"] for h in out], ["가까운정형외과의원", "먼내과의원"])  # 2km → 20km
+
+    def test_broken_db_falls_back_to_api(self):
+        with open(self.db_path, "wb") as f:
+            f.write(b"not a database")
+        with mock.patch("backend.tools.hira.fetch_items", return_value=None) as api, \
+                self.assertLogs("backend.tools.hira", logging.WARNING):
+            self.assertEqual(hira.search_hospitals("정형외과", *CITY_HALL), [])
+        api.assert_called()
+
+    def test_zip_without_expected_file(self):
+        bad = os.path.join(os.path.dirname(self.zip_path), "bad.zip")
+        with zipfile.ZipFile(bad, "w") as z:
+            z.writestr("other.csv", b"a,b\n")
+        with self.assertRaises(ValueError):
+            hospital_db.build(bad, [], self.db_path + "2")
+
+
+class FetchNmcAllTests(unittest.TestCase):
+    def setUp(self):
+        p1 = mock.patch("backend.tools.hospital_db.fetch_items")
+        p2 = mock.patch("backend.tools.hospital_db.time.sleep")  # 재시도 대기 생략
+        self.fetch, _ = p1.start(), p2.start()
+        self.addCleanup(p1.stop)
+        self.addCleanup(p2.stop)
+
+    @mock.patch.object(hospital_db, "NMC_PAGE_ROWS", 2)
+    def test_pages_until_short_page_with_retry(self):
+        self.fetch.side_effect = [[{"a": 1}, {"a": 2}], None, [{"a": 3}, {"a": 4}], [{"a": 5}]]
+        self.assertEqual(len(hospital_db.fetch_nmc_all()), 5)
+        self.assertEqual([c.args[2]["pageNo"] for c in self.fetch.call_args_list], [1, 2, 2, 3])
+
+    @mock.patch.object(hospital_db, "NMC_PAGE_ROWS", 2)
+    def test_gives_up_after_three_failures(self):
+        self.fetch.side_effect = [[{"a": 1}, {"a": 2}], None, None, None]
+        with self.assertRaises(RuntimeError):
+            hospital_db.fetch_nmc_all()
 
 
 class EgenSearchTests(unittest.TestCase):
