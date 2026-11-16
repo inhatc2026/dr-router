@@ -1,12 +1,36 @@
 """이번 주 응급 규칙 회귀 검사. API 키나 외부 패키지 없이 실행한다."""
 import unittest
 import unicodedata
+import json
+from pathlib import Path
+import re
+import tempfile
 
 from backend.agent.nodes.triage import check_emergency
-from backend.core.emergency_rules import is_emergency
+from backend.core.emergency_rules import is_emergency, load_rules, RULES_PATH
 
 
 class EmergencyRulesTests(unittest.TestCase):
+    def test_rule_file_rejects_missing_corrupt_or_empty_rules(self):
+        data = json.loads(RULES_PATH.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rules.json"
+            with self.assertRaises(FileNotFoundError):
+                load_rules(path)
+            invalid = ["{broken", json.dumps({**data, "version": 2}),
+                       json.dumps({**data, "keywords": []}),
+                       json.dumps({**data, "keywords": [" \t"]}),
+                       json.dumps({**data, "context_rules": [{}]})]
+            for text in invalid:
+                path.write_text(text, encoding="utf-8")
+                with self.subTest(text=text), self.assertRaises(ValueError):
+                    load_rules(path)
+            for pattern in ["[", ".*"]:
+                modified = {**data, "context_rules": [{"id": "bad", "context_keywords": ["치과"], "patterns": [pattern]}]}
+                path.write_text(json.dumps(modified), encoding="utf-8")
+                with self.subTest(pattern=pattern), self.assertRaises((ValueError, re.error)):
+                    load_rules(path)
+
     def test_danger_signs_in_user_language(self):
         cases = [
             "갑자기 가슴이 쥐어짜듯 아파요",  # 가이드의 필수 예시
