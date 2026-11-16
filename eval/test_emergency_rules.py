@@ -25,7 +25,9 @@ class EmergencyRulesTests(unittest.TestCase):
                 path.write_text(text, encoding="utf-8")
                 with self.subTest(text=text), self.assertRaises(ValueError):
                     load_rules(path)
-            for pattern in ["[", ".*"]:
+            path.write_text(json.dumps(data), encoding="utf-8-sig")
+            self.assertEqual(load_rules(path)[0], data["keywords"])
+            for pattern in ["[", ".*", "목 부었", "침\t못삼"]:
                 modified = {**data, "context_rules": [{"id": "bad", "context_keywords": ["치과"], "patterns": [pattern]}]}
                 path.write_text(json.dumps(modified), encoding="utf-8")
                 with self.subTest(pattern=pattern), self.assertRaises((ValueError, re.error)):
@@ -188,6 +190,13 @@ class EmergencyRulesTests(unittest.TestCase):
             "사랑니가 아프고 삼키는 게 힘들어요",
             "잇몸이 붓고 침을 삼키지 못해요",
             "치통이 있고 삼키기 어렵습니다",
+            "이가 아프고 목까지 부었어요",
+            "충치가 있는데 목까지 부었어요",
+            "이 뽑았는데 침을 못 삼켜요",
+            "잇몸이 붓고 침 삼키기가 좀 힘들어요",
+            "사랑니 때문에 밥을 못 삼켜요",
+            "잇몸이 부어서 아무것도 못 삼키겠어요",
+            "치통이 있고 목 부었어요",
         ]
         for text in cases:
             with self.subTest(text=text):
@@ -203,7 +212,12 @@ class EmergencyRulesTests(unittest.TestCase):
             "치과 예약을 하고 목도리를 샀어요",
             "치통 때문에 음식을 씹기가 힘들어요",
             "사랑니가 아프고 침 삼킬 때 따끔해요",
-            "오늘은 침 삼키기가 힘들어요",  # 치과 맥락이 없는 경우는 이번 추가 범위 밖
+            "이가 아프고 목도리를 샀어요",
+            "충치가 있어서 치과를 예약했어요",
+            "이 뽑기 게임을 했어요",
+            "잇몸이 붓고 밥 먹기가 불편해요",
+            "사랑니 때문에 밥을 천천히 먹어요",
+            "이가 아프고 손목 부었어요",
         ]
         for text in cases:
             with self.subTest(text=text):
