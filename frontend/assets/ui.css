@@ -1,4 +1,4 @@
-:root{--blue:#1a6fb5;--blue-d:#155a94;--ink:#14304d;--muted:#5d7088;--panel:#f6f9fc;--line:#dfe7f0;--soft:#eaf2fb}
+:root{--blue:#1a6fb5;--blue-d:#155a94;--ink:#14304d;--muted:#53657b;--panel:#f6f9fc;--line:#dfe7f0;--soft:#eaf2fb}
 *{box-sizing:border-box} [hidden]{display:none!important}
 body{margin:0;font-family:'Noto Sans KR',sans-serif;color:var(--ink);background:var(--panel);line-height:1.6}
 a{color:var(--blue-d)} button,input,textarea{font:inherit} button,a,input,textarea{touch-action:manipulation}
@@ -25,3 +25,30 @@ h1{font-size:28px;line-height:1.35;margin:0} h2{font-size:20px;margin:0} h3{font
 @media(max-width:800px){.hospital-layout{grid-template-columns:1fr}.map-panel{position:static}.map-panel iframe{height:320px}.map-placeholder{min-height:190px}}
 @media(max-width:480px){.nav-in{padding:14px 16px;gap:12px}.menu{gap:18px;font-size:14px}.page{padding:24px 16px}.logo .en{display:none}.page-heading{align-items:start;flex-wrap:wrap}h1{font-size:25px}.msg{max-width:100%}.hospital-card{padding:16px}.composer-foot{align-items:end}.page-heading>.btn{font-size:13px}.card-heading{flex-wrap:wrap}}
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
+
+/* 요구사항 v0.5: 읽을 수 있는 본문 크기와 누를 수 있는 영역 */
+body{font-size:16px}
+.muted,.address,.note,.eyebrow,.av,.status,.open-filter,.tag,.kind,.dept,.far-note,.actions .btn,.map-foot,.menu,.page-heading>.btn{font-size:16px}
+.btn,.chip,.menu a,.logo,.open-filter,summary,.emergency a{min-height:44px}
+.menu a,.emergency>a,.emergency p>a{display:inline-flex;align-items:center;min-width:44px}
+.menu{gap:16px;flex-wrap:wrap}
+.open-filter{cursor:pointer}.open-filter input{width:24px;height:24px}
+summary{cursor:pointer;padding:10px 0;color:var(--blue-d);font-weight:700}
+.place-details{margin-top:12px;border-top:1px solid var(--line)}
+.emergency .emergency-call{background:#962f28;border-color:#962f28;color:white}
+#emergency-places{margin-top:16px;color:var(--ink)}
+#places-map{height:400px;z-index:0}
+.map-legend,#map-status{padding:0 16px}
+.map-legend .hospital{color:#155a94}.map-legend .pharmacy{color:#14633d}.map-legend .er{color:#962f28}.map-legend .me{color:#62339b}
+.place-marker{border:2px solid white;border-radius:50%;color:white;display:grid;place-items:center;font-size:16px;font-weight:700;box-shadow:0 1px 5px #555}
+.map-panel .place-marker{display:grid}
+.place-marker.hospital{background:#155a94}.place-marker.pharmacy{background:#14633d}.place-marker.er{background:#962f28}.place-marker.me{background:#62339b}
+.map-panel .leaflet-touch .leaflet-control-zoom a{width:44px;height:44px;line-height:44px}
+.map-panel .leaflet-control-attribution{font-size:16px;color:#14304d;max-width:100%}
+.map-panel .leaflet-control-attribution a{display:inline-flex;align-items:center;min-height:44px;color:#155a94}
+.map-panel .leaflet-popup-content{font-size:16px}
+.map-panel a.leaflet-popup-close-button{width:44px;height:44px;font-size:24px;line-height:44px;color:#14304d}
+.map-panel .leaflet-popup-content-wrapper{padding-right:24px}
+.map-foot>a{display:inline-flex;align-items:center;min-height:44px}
+.emergency a{min-width:44px}
+@media(max-width:480px){#places-map{height:360px}.menu{gap:14px}.actions{align-items:stretch}.btn{max-width:100%}}

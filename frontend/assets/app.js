@@ -49,7 +49,7 @@
   function filterHospitals(items, kind = "전체", onlyOpen = false) {
     return items.filter(item => item && typeof item === "object")
       .filter(item => (kind === "전체" || kindOf(item) === kind) && (!onlyOpen || item.is_open === true))
-      .sort((a, b) => KINDS.indexOf(kindOf(a)) - KINDS.indexOf(kindOf(b)) || distanceValue(a.distance_m) - distanceValue(b.distance_m));
+      .sort((a, b) => distanceValue(a.distance_m) - distanceValue(b.distance_m));
   }
   function mapLinks(item) {
     const { lat, lng } = item;
@@ -67,12 +67,13 @@
     return typeof phone === "string" && /^\+?[\d ()-]+$/.test(phone) && /\d/.test(phone)
       ? "tel:" + phone.replace(/[^\d+]/g, "") : null;
   }
-  function saveResults(data, locationLabel = "") {
+  function saveResults(data, locationLabel = "", position = null) {
     // 증상·대화 이력은 저장하지 않는다. 의료기관 결과만 현재 탭에 임시 보관한다.
     try {
       root.sessionStorage.setItem(RESULT_KEY, JSON.stringify({
         hospitals: data.hospitals, departments: data.departments.map(dept => ({ name: dept.name })),
-        emergency: data.emergency === true, locationLabel, savedAt: Date.now(),
+        emergency: data.emergency === true, locationLabel,
+        position: position && mapLinks(position) ? { lat: position.lat, lng: position.lng } : null, savedAt: Date.now(),
       }));
       return true;
     } catch { return false; }

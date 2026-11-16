@@ -9,10 +9,10 @@ test('unknown hours stay distinct from closed and only true matches open filter'
   const input = [true, false, null].map(is_open => ({ kind: '약국', is_open }));
   assert.deepEqual(api.filterHospitals(input, '약국', true), [input[0]]);
 });
-test('group order takes priority over distance without mutating the response', () => {
+test('distance takes priority across kinds without mutating the response', () => {
   const input = [{ name: 'ER', kind: '응급실', distance_m: 20 }, { name: 'far', kind: '병원', distance_m: 35000 },
     { name: 'drug', kind: '약국', distance_m: 10 }, { name: 'near', kind: '병원', distance_m: 200 }];
-  assert.deepEqual(api.filterHospitals(input).map(h => h.name), ['near', 'far', 'drug', 'ER']);
+  assert.deepEqual(api.filterHospitals(input).map(h => h.name), ['drug', 'ER', 'near', 'far']);
   assert.deepEqual(api.filterHospitals(input, '응급실').map(h => h.name), ['ER']);
   assert.equal(input[0].name, 'ER');
 });
@@ -75,4 +75,18 @@ test('result storage expires and does not retain raw conversation or reasons', (
     store.set(key, '{broken');
     assert.equal(api.loadResults(), null);
   } finally { global.sessionStorage = original; }
+});
+
+test('foreground and background combinations meet 4.5:1 text contrast', () => {
+  const luminance = hex => {
+    const rgb = hex.match(/\w\w/g).map(value => parseInt(value, 16) / 255)
+      .map(value => value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4);
+    return rgb[0] * .2126 + rgb[1] * .7152 + rgb[2] * .0722;
+  };
+  for (const [foreground, background] of [['53657b','f6f9fc'], ['53657b','edf0f3'], ['ffffff','1a6fb5'],
+    ['187047','e6f6ee'], ['566473','edf0f3'], ['845700','fff3d5'], ['962f28','fff0ed'],
+    ['155a94','eaf2fb'], ['ffffff','155a94'], ['ffffff','14633d'], ['ffffff','962f28'], ['ffffff','62339b']]) {
+    const values = [luminance(foreground), luminance(background)].sort((a, b) => b - a);
+    assert.ok((values[0] + .05) / (values[1] + .05) >= 4.5, `${foreground} on ${background}`);
+  }
 });

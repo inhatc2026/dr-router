@@ -6,6 +6,7 @@
 <title>주변 의료기관 · 닥터라우터</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;900&family=Poppins:wght@600;700&display=swap">
 <link rel="stylesheet" href="assets/ui.css">
+<link rel="stylesheet" href="assets/vendor/leaflet/leaflet.css">
 </head>
 <body>
 
@@ -37,19 +38,24 @@
         <button class="chip" type="button" data-kind="응급실" aria-pressed="false">응급실</button>
       </div>
       <label class="open-filter"><input id="only-open" type="checkbox">지금 진료중만 보기</label>
-      <p class="note">병원 → 약국 → 응급실 순이며, 각 종류 안에서 가까운 순입니다. 가까운 곳이 없으면 5 km 밖의 기관도 표시됩니다.</p>
+      <p class="note">전체 거리순입니다. 종류별 필터로 원하는 기관을 찾을 수 있습니다. 가까운 곳이 없으면 5 km 밖의 기관도 표시됩니다.</p>
       <p class="note">세부 내과를 추천받아도 병원 목록에는 ‘내과’로 표시될 수 있습니다.</p>
       <div id="hospital-list" class="hospital-list"></div>
     </section>
-    <section id="map-panel" class="map-panel" aria-label="선택한 의료기관 지도">
+    <section id="map-panel" class="map-panel" aria-label="의료기관과 내 위치 지도">
       <div class="map-heading"><h2 id="map-name">의료기관 위치</h2><p id="map-address" class="address"></p></div>
-      <div id="map-placeholder" class="map-placeholder">기관의 ‘지도 보기’를 누르면 실제 좌표를 지도에서 확인할 수 있습니다.</div>
-      <iframe id="map-frame" title="선택한 의료기관 위치" referrerpolicy="no-referrer" loading="lazy" hidden></iframe>
+      <div id="map-placeholder" class="map-placeholder">표시할 좌표를 확인하고 있습니다.</div>
+      <div id="places-map" aria-label="의료기관 지도" hidden></div>
+      <p class="map-legend"><span class="hospital">병: 병원</span> · <span class="pharmacy">약: 약국</span> · <span class="er">응: 응급실</span> · <span class="me">나: 내 위치</span></p>
+      <p id="map-status" class="note" role="status"></p>
       <div class="map-foot"><a id="external-map" target="_blank" rel="noopener noreferrer" hidden>큰 지도에서 보기 ↗</a><p class="note">지도: OpenStreetMap. 지도가 표시되지 않으면 큰 지도 링크를 이용해 주세요.</p></div>
     </section>
   </div>
+  <p class="note">이 안내는 의학적 진단이 아닙니다. 증상이 심하거나 빠르게 악화되면 즉시 의료진의 도움을 받으세요.</p>
 </main>
 <script src="assets/app.js" defer></script>
+<script src="assets/places.js" defer></script>
+<script src="assets/vendor/leaflet/leaflet.js" defer></script>
 <script src="assets/hospitals.js" defer></script>
 </body>
 </html>

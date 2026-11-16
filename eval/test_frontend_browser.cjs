@@ -22,6 +22,25 @@ const places = [
 const reply = { reply: '소화기내과 진료를 안내합니다.', emergency: false, need_more_info: false,
   departments: [{ name: '소화기내과', score: .8, reason: '증상을 확인할 수 있는 진료과입니다.' }], hospitals: places };
 
+async function checkAccessibility(page) {
+  const problems = await page.evaluate(() => {
+    const issues = [];
+    const visible = node => node.getClientRects().length && getComputedStyle(node).visibility !== 'hidden';
+    for (const node of document.querySelectorAll('p,span,a,button,label,summary,h1,h2,h3,small,input,textarea')) {
+      if (!visible(node) || node.closest('svg') || node.disabled) continue;
+      const hasText = [...node.childNodes].some(child => child.nodeType === Node.TEXT_NODE && child.textContent.trim());
+      if (hasText && parseFloat(getComputedStyle(node).fontSize) < 16) issues.push(`small text: ${node.textContent.slice(0, 30)}`);
+    }
+    for (const node of document.querySelectorAll('button:not(:disabled),a[href],summary,.open-filter,input:not([type=checkbox]),textarea')) {
+      if (!visible(node)) continue;
+      const rect = node.getBoundingClientRect();
+      if (rect.height < 44 || rect.width < 44) issues.push(`small target: ${node.textContent.slice(0, 30)} (${rect.width} × ${rect.height})`);
+    }
+    return issues;
+  });
+  assert.deepEqual(problems, []);
+}
+
 (async () => {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -43,8 +62,10 @@ const reply = { reply: '소화기내과 진료를 안내합니다.', emergency: 
     await page.route('**/api/chat', async route => {
       requests.push(route.request().postDataJSON());
       if (mode === 'failure') return route.fulfill({ status: 503, body: 'unavailable' });
-      const data = mode === 'followup' ? { reply: '언제부터 불편하셨나요?', emergency: false, need_more_info: true, hospitals: [], departments: [] }
+      const data = mode === 'followup' ? { ...reply, reply: '언제부터 불편하셨나요?', need_more_info: true }
         : mode === 'emergency' ? { reply: '즉시 응급 안내를 확인하세요.', emergency: true, need_more_info: false, hospitals: [], departments: [] }
+        : mode === 'emergency-places' ? { ...reply, emergency: true, need_more_info: true }
+        : mode === 'low-score' ? { ...reply, departments: [{ name: '외과', score: .2, reason: '정보 부족' }, { name: '내과', score: .4, reason: '정보 부족' }, { name: '치과', score: .1, reason: '정보 부족' }, { name: '피부과', score: .05, reason: '정보 부족' }] }
         : mode === 'unsafe-text' ? { ...reply, reply: '<img src=x onerror="window.injected=true">', hospitals: [{ ...places[3], name: '<script>window.injected=true</script>' }] }
         : reply;
       await route.fulfill({ contentType: 'application/json', body: JSON.stringify(data) });
@@ -53,6 +74,12 @@ const reply = { reply: '소화기내과 진료를 안내합니다.', emergency: 
     await page.goto(`${base}/hospitals.html`);
     assert.match(await page.locator('#hospital-list').innerText(), /표시할 결과가 없/);
     await page.goto(`${base}/chat.html`);
+    await page.locator('#send').click();
+    assert.match(await page.locator('#chat-status').innerText(), /입력해/);
+    await page.locator('#message').fill('가'.repeat(501));
+    await page.locator('#send').click();
+    assert.match(await page.locator('#chat-status').innerText(), /500자/);
+    assert.equal(requests.length, 0);
     await page.evaluate(() => Object.defineProperty(navigator, 'geolocation', { configurable: true, value: { getCurrentPosition: (_, fail) => fail({ code: 1 }) } }));
     await page.locator('#get-location').click();
     assert.match(await page.locator('#location-status').innerText(), /시·군·구/);
@@ -64,6 +91,9 @@ const reply = { reply: '소화기내과 진료를 안내합니다.', emergency: 
     assert.equal(requests[0].region, '인천 미추홀구');
     assert.equal(requests[0].lat, null);
     assert.deepEqual(requests[0].history, []);
+    assert.equal(await page.locator('#recommendations').isVisible(), false);
+    assert.equal(await page.locator('#results-link').isVisible(), false);
+    assert.equal(await page.evaluate(() => DrRouter.loadResults()), null);
     mode = 'normal';
     await page.locator('#message').fill('어제부터요');
     await page.locator('#send').click();
@@ -73,20 +103,22 @@ const reply = { reply: '소화기내과 진료를 안내합니다.', emergency: 
     assert.match(await page.locator('#recommendations').innerText(), /소화기내과/);
     await page.locator('#results-link').click();
     await page.waitForURL('**/hospitals.html');
-    assert.deepEqual(await page.locator('.hospital-card h2').allTextContents(), ['가까운의원', '먼거리의원', '검증약국', '검증응급실']);
-    assert.match(await page.locator('.hospital-card').nth(1).innerText(), /확인 필요/);
-    assert.match(await page.locator('.hospital-card').nth(1).innerText(), /42.5 km/);
+    assert.deepEqual(await page.locator('.hospital-card h2').allTextContents(), ['검증약국', '가까운의원', '검증응급실', '먼거리의원']);
+    assert.match(await page.locator('.hospital-card').nth(3).innerText(), /확인 필요/);
+    assert.match(await page.locator('.hospital-card').nth(3).innerText(), /42.5 km/);
     assert.match(await page.locator('#search-context').innerText(), /소화기내과/);
     assert.equal(await page.locator('.hospital-card .dept').first().innerText(), '내과');
-    assert.equal(await page.locator('.hospital-card a').first().getAttribute('href'), 'tel:0325556666');
+    assert.equal(await page.locator('.hospital-card a').first().getAttribute('href'), 'tel:0321234567');
+    await page.locator('summary').first().click();
+    assert.equal(await page.locator('details').first().getAttribute('open'), '');
+    assert.equal(await page.locator('.place-marker').count(), 3);
     await page.getByRole('button', { name: '지도 보기', exact: true }).first().click();
-    const mapSrc = await page.locator('#map-frame').getAttribute('src');
-    assert.equal(new URL(mapSrc).searchParams.get('marker'), '37.45,126.65');
+    assert.match(await page.locator('#external-map').getAttribute('href'), /mlat=37.45&mlon=126.65/);
     assert.equal(await page.locator('#map-name').innerText(), '가까운의원');
     await page.locator('[data-kind="약국"]').click();
     assert.equal(await page.locator('.hospital-card').count(), 1);
     assert.equal(await page.getByRole('button', { name: '좌표 정보 없음' }).isDisabled(), true);
-    assert.equal(await page.locator('#map-frame').isVisible(), false);
+    assert.equal(await page.locator('#places-map').isVisible(), false);
     await page.locator('#only-open').check();
     assert.match(await page.locator('#hospital-list').innerText(), /조건/);
     await page.locator('[data-kind="전체"]').click();
@@ -94,8 +126,9 @@ const reply = { reply: '소화기내과 진료를 안내합니다.', emergency: 
     await page.locator('#only-open').uncheck();
     await fs.mkdir(path.resolve(__dirname, '../test-results'), { recursive: true });
     await page.screenshot({ path: path.resolve(__dirname, '../test-results/hospitals-desktop.png'), fullPage: true });
-    await page.setViewportSize({ width: 390, height: 844 });
+    await page.setViewportSize({ width: 360, height: 800 });
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await checkAccessibility(page);
     await page.screenshot({ path: path.resolve(__dirname, '../test-results/hospitals-mobile.png'), fullPage: true });
     console.log('PASS chat → follow-up → hospital list, filters, status, distance, phone, map, mobile');
 
@@ -128,13 +161,39 @@ const reply = { reply: '소화기내과 진료를 안내합니다.', emergency: 
     await page.locator('#results-link').click();
     await page.waitForURL('**/hospitals.html');
     assert.equal(await page.locator('#emergency-result').isVisible(), true);
-    assert.match(await page.locator('#hospital-list').innerText(), /이번 응답에 의료기관이 없/);
+    assert.match(await page.locator('#hospital-list').innerText(), /응급실 정보가 없/);
     await page.goto(`${base}/chat.html`);
     await page.locator('#new-chat').click();
     assert.equal(await page.evaluate(() => DrRouter.loadResults()), null);
     assert.equal(await page.locator('#conversation .msg').count(), 0);
     assert.deepEqual(errors, []);
     console.log('PASS emergency without facilities and reset');
+
+    mode = 'emergency-places';
+    await page.locator('#message').fill('응급 목록 확인');
+    await page.locator('#send').click();
+    await page.locator('#emergency-places .hospital-card').waitFor();
+    assert.deepEqual(await page.locator('#emergency-places h2').allTextContents(), ['검증응급실']);
+    assert.equal(await page.locator('#recommendations').isVisible(), false);
+    mode = 'low-score';
+    await page.locator('#message').fill('새 문진');
+    await page.locator('#send').click();
+    await page.locator('#recommendations').waitFor({ state: 'visible' });
+    assert.deepEqual(requests.at(-1).history, []);
+    assert.equal(await page.locator('#conversation .msg').count(), 2);
+    assert.equal(await page.locator('#emergency-result').isVisible(), false);
+    assert.deepEqual(await page.locator('.department h3').allTextContents(), ['내과', '외과', '치과']);
+    assert.match(await page.locator('#recommendations').innerText(), /분류 확신이 낮/);
+    assert.match(await page.locator('#recommendations').innerText(), /0.40/);
+    assert.match(await page.locator('#recommendations').innerText(), /근거 문서: 확인 필요/);
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await page.screenshot({ path: path.resolve(__dirname, '../test-results/chat-mobile.png'), fullPage: true });
+    await checkAccessibility(page);
+    await page.goto(`${base}/index.html`);
+    assert.equal(await page.locator('.menu').isVisible(), true);
+    await checkAccessibility(page);
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    console.log('PASS 500-character guard, follow-up result suppression, emergency restart, top-3 scores, mobile home');
 
     const geoContext = await browser.newContext({ permissions: ['geolocation'], geolocation: { latitude: 37.5, longitude: 126.6 } });
     await geoContext.route('**/*', route => route.request().url().startsWith(base) ? route.continue() : route.abort());
@@ -150,6 +209,13 @@ const reply = { reply: '소화기내과 진료를 안내합니다.', emergency: 
     assert.equal(geoRequest.lat, 37.5);
     assert.equal(geoRequest.lng, 126.6);
     assert.equal(geoRequest.region, null);
+    await geoPage.locator('#results-link').click();
+    await geoPage.waitForURL('**/hospitals.html');
+    assert.equal(await geoPage.locator('.place-marker.me').count(), 1);
+    assert.equal(await geoPage.locator('.place-marker.hospital').count(), 2);
+    assert.equal(await geoPage.locator('.place-marker.er').count(), 1);
+    assert.equal(await geoPage.locator('.place-marker.pharmacy').count(), 0); // 좌표 없는 기관을 추측하지 않는다.
+    assert.deepEqual(errors, []);
     console.log('PASS location permission and coordinate request');
   } finally {
     if (browser) await browser.close();
