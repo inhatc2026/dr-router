@@ -1,12 +1,38 @@
 """이번 주 응급 규칙 회귀 검사. API 키나 외부 패키지 없이 실행한다."""
 import unittest
 import unicodedata
+import json
+from pathlib import Path
+import re
+import tempfile
 
 from backend.agent.nodes.triage import check_emergency
-from backend.core.emergency_rules import is_emergency
+from backend.core.emergency_rules import is_emergency, load_rules, RULES_PATH
 
 
 class EmergencyRulesTests(unittest.TestCase):
+    def test_rule_file_rejects_missing_corrupt_or_empty_rules(self):
+        data = json.loads(RULES_PATH.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rules.json"
+            with self.assertRaises(FileNotFoundError):
+                load_rules(path)
+            invalid = ["{broken", json.dumps({**data, "version": 2}),
+                       json.dumps({**data, "keywords": []}),
+                       json.dumps({**data, "keywords": [" \t"]}),
+                       json.dumps({**data, "context_rules": [{}]})]
+            for text in invalid:
+                path.write_text(text, encoding="utf-8")
+                with self.subTest(text=text), self.assertRaises(ValueError):
+                    load_rules(path)
+            path.write_text(json.dumps(data), encoding="utf-8-sig")
+            self.assertEqual(load_rules(path)[0], data["keywords"])
+            for pattern in ["[", ".*", "목 부었", "침\t못삼"]:
+                modified = {**data, "context_rules": [{"id": "bad", "context_keywords": ["치과"], "patterns": [pattern]}]}
+                path.write_text(json.dumps(modified), encoding="utf-8")
+                with self.subTest(pattern=pattern), self.assertRaises((ValueError, re.error)):
+                    load_rules(path)
+
     def test_danger_signs_in_user_language(self):
         cases = [
             "갑자기 가슴이 쥐어짜듯 아파요",  # 가이드의 필수 예시
@@ -150,6 +176,60 @@ class EmergencyRulesTests(unittest.TestCase):
 
     def test_triage_with_missing_input(self):
         self.assertIs(check_emergency({})["emergency"], False)
+
+    def test_dental_symptoms_with_neck_swelling_or_dysphagia(self):
+        cases = [
+            "사랑니 쪽이 붓더니 얼굴이랑 목까지 부었고 열이 나요",
+            "잇몸이 붓고 침 삼키기가 힘들어요",
+            "치통이 있는데 목까지 퉁퉁 부었어요",
+            "어금니가 아프고 목 주변까지 붓고 있어요",
+            "치아가 아프고 목도 부었어요",
+            "발치 후 음식 삼키기가 너무 어려워요",
+            "이를 뽑고 침을 못 삼켜요",
+            "잇몸이 붓고 삼킬 수가 없어요",
+            "사랑니가 아프고 삼키는 게 힘들어요",
+            "잇몸이 붓고 침을 삼키지 못해요",
+            "치통이 있고 삼키기 어렵습니다",
+            "이가 아프고 목까지 부었어요",
+            "충치가 있는데 목까지 부었어요",
+            "이 뽑았는데 침을 못 삼켜요",
+            "잇몸이 붓고 침 삼키기가 좀 힘들어요",
+            "사랑니 때문에 밥을 못 삼켜요",
+            "잇몸이 부어서 아무것도 못 삼키겠어요",
+            "치통이 있고 목 부었어요",
+        ]
+        for text in cases:
+            with self.subTest(text=text):
+                self.assertTrue(is_emergency(text))
+
+    def test_dental_evaluation_questions_remain_unmatched(self):
+        # PR #3의 분류 평가 문항. False는 임상적 비응급 판정이 아니다.
+        cases = [
+            "어금니가 욱신거리고 찬물을 마시면 이가 시려요",
+            "양치할 때 잇몸에서 피가 나고 잇몸이 부었어요",
+            "사랑니 쪽 잇몸이 붓고 음식 씹을 때 아파요",
+            "이가 깨졌는데 뜨거운 걸 먹으면 찌릿해요",
+            "치과 예약을 하고 목도리를 샀어요",
+            "치통 때문에 음식을 씹기가 힘들어요",
+            "사랑니가 아프고 침 삼킬 때 따끔해요",
+            "이가 아프고 목도리를 샀어요",
+            "충치가 있어서 치과를 예약했어요",
+            "이 뽑기 게임을 했어요",
+            "잇몸이 붓고 밥 먹기가 불편해요",
+            "사랑니 때문에 밥을 천천히 먹어요",
+            "이가 아프고 손목 부었어요",
+        ]
+        for text in cases:
+            with self.subTest(text=text):
+                self.assertFalse(is_emergency(text))
+
+    def test_dental_rules_keep_normalization_and_conservative_policy(self):
+        for text in ["잇 몸 이 붓 고 침\n삼키기가\t힘들어요",
+                     unicodedata.normalize("NFD", "사랑니가 아프고 목까지 부었어요"),
+                     "잇몸이 붓고 침 삼키기가 힘들지는 않아요",
+                     "이를 뽑았는데 피가 안 멈춰요"]:
+            with self.subTest(text=text):
+                self.assertTrue(is_emergency(text))
 
 
 if __name__ == "__main__":
