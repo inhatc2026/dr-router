@@ -301,12 +301,30 @@ def is_holiday(d: date) -> bool:
 
 
 def holidays_of(year: int) -> Optional[Set[date]]:
+    """그 해 공휴일. 병원 DB에 저장돼 있으면 DB에서, 없으면 API로 받는다(하루 캐시)."""
     cached = _holiday_cache.get(year)
     if cached and time.time() - cached[0] < HOLIDAY_TTL:
         return cached[1]
+    from backend.tools import hospital_db  # hospital_db가 이 모듈을 쓰므로 순환 import를 피해 여기서
+    days = None
+    if hospital_db.available():
+        try:
+            days = hospital_db.holidays(year)
+        except Exception as e:  # noqa: BLE001  DB 문제면 API로 대신
+            logger.warning("병원 DB에서 공휴일 읽기 실패 (%s)", type(e).__name__)
+    if days is None:
+        days = fetch_holidays(year)
+    if days is None:
+        logger.warning("%s년 공휴일 조회 실패 — 평일로 간주", year)
+        return None
+    _holiday_cache[year] = (time.time(), days)
+    return days
+
+
+def fetch_holidays(year: int) -> Optional[Set[date]]:
+    """특일 정보 API로 그 해 공휴일(임시·대체공휴일 포함)을 받는다. 실패하면 None."""
     items = fetch_items(HOLIDAY, HOLIDAY_API_KEY, {"solYear": year, "numOfRows": 100}, timeout=10)
     if items is None:
-        logger.warning("%s년 공휴일 조회 실패 — 평일로 간주", year)
         return None
     days = set()
     for it in items:
@@ -316,5 +334,4 @@ def holidays_of(year: int) -> Optional[Set[date]]:
             days.add(datetime.strptime(str(it["locdate"]), "%Y%m%d").date())
         except (KeyError, ValueError):
             continue
-    _holiday_cache[year] = (time.time(), days)
     return days

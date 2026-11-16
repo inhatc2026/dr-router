@@ -27,19 +27,23 @@ class Department(TypedDict):
 
 
 class Hospital(TypedDict):
-    """의료기관 1개의 모양"""
-    name: str              # 병원/약국명
-    dept: str              # 진료과
-    distance_m: int        # 사용자로부터 거리(m)
-    is_open: bool          # 현재 진료중 여부
-    phone: Optional[str]   # 전화번호 (없을 수 있음)
+    """의료기관 1개의 모양 (= schemas.HospitalOut)"""
+    name: str                 # 병원/약국/응급실 이름
+    dept: str                 # 진료과 (약국은 "약국", 응급실은 "응급의학과")
+    distance_m: int           # 사용자로부터 거리(m)
+    is_open: Optional[bool]   # 지금 진료중 여부 (None = 진료시간 정보 없음)
+    phone: Optional[str]      # 전화번호 (없을 수 있음)
+    kind: str                 # "병원" / "약국" / "응급실"
+    address: Optional[str]    # 주소
+    lat: Optional[float]      # 위도 (지도 표시용)
+    lng: Optional[float]      # 경도
 
 
 class AgentState(TypedDict, total=False):
     # ── 입력 ──────────────────────────────
     user_input: str               # 이번 턴 사용자 발화
     history: List[dict]           # 이전 대화 [{"role":..., "content":...}, ...]
-    location: dict                # {"lat": float, "lng": float}
+    location: dict                # {"lat": float, "lng": float}, 위치 거부 시 {"region": "인천 미추홀구"}
 
     # ── ① 증상 수집 ───────────────────────
     symptoms: List[str]           # 추출된 핵심 증상

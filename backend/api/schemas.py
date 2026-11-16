@@ -11,6 +11,7 @@ class ChatRequest(BaseModel):
     lat: Optional[float] = None
     lng: Optional[float] = None
     history: List[dict] = []
+    region: Optional[str] = None            # 위치 거부 시 지역명 (예: "인천 미추홀구") → State location["region"]
 
 
 class DepartmentOut(BaseModel):
@@ -21,10 +22,14 @@ class DepartmentOut(BaseModel):
 
 class HospitalOut(BaseModel):
     name: str
-    dept: str
+    dept: str                               # 진료과 (약국은 "약국", 응급실은 "응급의학과")
     distance_m: int
     is_open: Optional[bool] = None          # True 진료중 / False 휴진·진료시간 밖 / None 정보 없음
     phone: Optional[str] = None
+    kind: str = "병원"                       # "병원" / "약국" / "응급실" (목록 필터용)
+    address: Optional[str] = None
+    lat: Optional[float] = None             # 지도 표시용
+    lng: Optional[float] = None
 
 
 class ChatResponse(BaseModel):

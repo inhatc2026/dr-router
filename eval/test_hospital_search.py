@@ -22,7 +22,7 @@ import requests
 
 from backend.agent.nodes import search
 from backend.api.schemas import HospitalOut
-from backend.tools import _common, egen, hira, hospital_db, hours
+from backend.tools import _common, egen, hira, hospital_db, hours, pharmacy
 from backend.tools.hours import HOLIDAY_KEY, KST, Schedule
 
 CITY_HALL = (37.5665, 126.9780)  # 서울시청
@@ -179,7 +179,8 @@ class HiraSearchTests(unittest.TestCase):
         self.fetch.return_value = [hira_item("튼튼정형외과의원", "320.7", phone="02-123-4567")]
         out = hira.search_hospitals("정형외과", *CITY_HALL)
         self.assertEqual(out, [{"name": "튼튼정형외과의원", "dept": "정형외과", "distance_m": 320,
-                                "is_open": None, "phone": "02-123-4567"}])
+                                "is_open": None, "phone": "02-123-4567", "kind": "병원",
+                                "address": "서울특별시 중구 세종대로 1", "lat": 37.56, "lng": 126.97}])
         HospitalOut(**out[0])  # schemas.py 계약 위반이면 예외
 
     def test_hours_looked_up_once_for_top_results_only(self):
@@ -264,11 +265,14 @@ class HiraSearchTests(unittest.TestCase):
         self.fetch.assert_not_called()
 
     def test_widens_radius_when_too_few(self):
+        # 2km → 5km → 20km (요구사항 FR-21: 기본 2km, 5km까지 넓히고 그래도 없으면 가장 가까운 곳)
+        self.assertEqual(hira.RADII, (2000, 5000, 20000))
         self.fetch.side_effect = [[hira_item("가까운곳", 800)],
+                                  [hira_item("가까운곳", 800)],
                                   [hira_item("가까운곳", 800), hira_item("먼곳", 15000)]]
         out = hira.search_hospitals("안과", *CITY_HALL, top=2)
         radii = [c.args[2]["radius"] for c in self.fetch.call_args_list]
-        self.assertEqual(radii, list(hira.RADII))
+        self.assertEqual(radii, [2000, 5000, 20000])
         self.assertEqual([h["name"] for h in out], ["가까운곳", "먼곳"])
 
     def test_stops_at_first_radius_when_enough(self):
@@ -421,11 +425,15 @@ class IsOpenTests(unittest.TestCase):
 
 
 class HolidayTests(unittest.TestCase):
+    """병원 DB가 없을 때 공휴일 API 경로. (DB 경로는 PlacesDbTests)"""
+
     def setUp(self):
         clear_caches()
-        p = mock.patch("backend.tools.hours.fetch_items")
-        self.fetch = p.start()
-        self.addCleanup(p.stop)
+        p1 = mock.patch("backend.tools.hours.fetch_items")
+        p2 = mock.patch("backend.tools.hospital_db.available", return_value=False)
+        self.fetch, _ = p1.start(), p2.start()
+        self.addCleanup(p1.stop)
+        self.addCleanup(p2.stop)
 
     def test_parses_and_caches(self):
         self.fetch.return_value = [
@@ -557,6 +565,7 @@ def write_fixture_zip(path):
         ["Y5", "먼내과의원", "의원", "서울특별시 강남구 강남대로 1", "02-555-5555", "127.0276", "37.4979"],
         ["Y6", "좌표없는의원", "의원", "서울특별시 중구 세종대로 3", "02-666-6666", "", ""],
         ["Y7", "동네치과의원", "치과의원", "서울특별시 중구 세종대로 4", "02-777-7777", "126.9785", "37.5668"],
+        ["Y8", "부산중구의원", "의원", "부산광역시 중구 중앙대로 1", "051-888-8888", "129.0320", "35.1030"],
     ]
     days = ["일요일", "월요일", "화요일", "수요일", "목요일", "금요일", "토요일"]
     detail_header = ["암호화요양기호", "요양기관명", "휴진안내_공휴일", "점심시간_평일", "점심시간_토요일"]
@@ -565,7 +574,8 @@ def write_fixture_zip(path):
     detail = [["Y1", "가까운정형외과의원", "전부 휴진", "13시00분~14시00분", ""] + weekday_hours,
               ["Y3", "상세만있는의원", "휴진", "12:30~13:30", ""] + weekday_hours]
     subj = [["Y1", "05"], ["Y2", "05"], ["Y3", "05"], ["Y4", "05"], ["Y5", "01"], ["Y6", "05"], ["Y1", "01"],
-            ["Y7", "51"], ["Y7", "54"], ["Y7", "56"]]  # 치과의원은 '49 치과' 대신 세부 코드 여러 개
+            ["Y7", "51"], ["Y7", "54"], ["Y7", "56"],  # 치과의원은 '49 치과' 대신 세부 코드 여러 개
+            ["Y8", "13"]]
     with zipfile.ZipFile(path, "w") as z:
         z.writestr("1.병원정보서비스(2026.9.).csv", csv_bytes(hosp_header, hosp))
         z.writestr("4.의료기관별상세정보서비스_02_세부정보(2026.9.).csv", csv_bytes(detail_header, detail))
@@ -578,6 +588,19 @@ FIXTURE_NMC = [  # 병·의원 찾기: Y1·Y2만 연결된다 (Y1은 전화번�
     {**nmc_item("조금먼정형외과의원", "02-222-2222", **WEEKDAYS), "dutyAddr": "서울특별시 중구 세종대로 2"},
     {**nmc_item("다른동네의원", "02-999-9999", **WEEKDAYS), "dutyAddr": "부산광역시 중구 중앙대로 1"},
 ]
+FIXTURE_PHARMACIES = [  # 약국: 국립중앙의료원 약국 목록 모양
+    {**nmc_item("시청앞약국", "02-100-0001", **WEEKDAYS, d8=("0900", 1300)), "hpid": "C1",
+     "dutyAddr": "서울특별시 중구 세종대로 10", "wgs84Lat": 37.5667, "wgs84Lon": 126.9782},
+    {"dutyName": "시간모름약국", "dutyTel1": "02-100-0002", "hpid": "C2",
+     "dutyAddr": "서울특별시 중구 세종대로 11", "wgs84Lat": 37.5690, "wgs84Lon": 126.9800},
+    {"dutyName": "좌표없는약국", "hpid": "C3", "dutyAddr": "서울특별시 중구 세종대로 12"},
+]
+FIXTURE_ERS = [  # 응급실: E-Gen 응급의료기관 목록 모양
+    {**er_item("먼응급실", 37.6000, 127.0000), "hpid": "E1", "dutyAddr": "서울특별시 성북구 1"},
+    {**er_item("가까운응급실", 37.5680, 126.9790, tel1="02-대표", tel3="02-응급실직통"), "hpid": "E2",
+     "dutyAddr": "서울특별시 중구 2"},
+]
+FIXTURE_HOLIDAYS = {2026: {date(2026, 12, 25), date(2026, 10, 5)}}
 
 
 class HospitalDbTests(unittest.TestCase):
@@ -591,18 +614,24 @@ class HospitalDbTests(unittest.TestCase):
         self.zip_path = os.path.join(tmp.name, "fixture.zip")
         self.db_path = os.path.join(tmp.name, "hospitals.sqlite")
         write_fixture_zip(self.zip_path)
-        self.stats = hospital_db.build(self.zip_path, FIXTURE_NMC, self.db_path, version="테스트_20260930")
+        self.stats = hospital_db.build(self.zip_path, FIXTURE_NMC, self.db_path, version="테스트_20260930",
+                                       pharmacies=FIXTURE_PHARMACIES, ers=FIXTURE_ERS,
+                                       holiday_days=FIXTURE_HOLIDAYS)
         p = mock.patch.object(hospital_db, "DB_PATH", self.db_path)
         p.start()
         self.addCleanup(p.stop)
 
     def test_build_stats(self):
-        self.assertEqual(self.stats["hospitals"], 6)   # 좌표 없는 1곳 제외
-        self.assertEqual(self.stats["no_coords"], 1)
+        self.assertEqual(self.stats["hospitals"], 7)   # 좌표 없는 1곳 제외
+        self.assertEqual(self.stats["no_coords"], 2)   # 병원 1 + 약국 1
         self.assertEqual(self.stats["nmc"], 2)         # Y1, Y2
         self.assertEqual(self.stats["hira"], 1)        # Y3 (병·의원 찾기에 없음 → 심평원 세부정보)
-        self.assertEqual(self.stats["none"], 3)        # Y4, Y5, Y7
-        self.assertEqual(hospital_db.info()["hira_version"], "테스트_20260930")
+        self.assertEqual(self.stats["none"], 4)        # Y4, Y5, Y7, Y8
+        self.assertEqual((self.stats["pharmacies"], self.stats["ers"], self.stats["holidays"]), (2, 2, 2))
+        meta = hospital_db.info()
+        self.assertEqual(meta["hira_version"], "테스트_20260930")
+        self.assertEqual(meta["schema_version"], hospital_db.SCHEMA_VERSION)
+        self.assertTrue(hospital_db.available())
         self.assertFalse(os.path.exists(self.db_path + ".tmp"))
 
     def test_search_filters_department_and_radius_sorted(self):
@@ -650,9 +679,10 @@ class HospitalDbTests(unittest.TestCase):
         with open(self.db_path, "wb") as f:
             f.write(b"not a database")
         with mock.patch("backend.tools.hira.fetch_items", return_value=None) as api, \
-                self.assertLogs("backend.tools.hira", logging.WARNING):
+                self.assertLogs("backend.tools.hospital_db", logging.WARNING) as logs:
             self.assertEqual(hira.search_hospitals("정형외과", *CITY_HALL), [])
-        api.assert_called()
+        api.assert_called()  # DB를 못 쓰면 API로 대신 찾는다
+        self.assertIn("다시 실행", "".join(logs.output))
 
     def test_zip_without_expected_file(self):
         bad = os.path.join(os.path.dirname(self.zip_path), "bad.zip")
@@ -670,27 +700,135 @@ class FetchNmcAllTests(unittest.TestCase):
         self.addCleanup(p1.stop)
         self.addCleanup(p2.stop)
 
-    @mock.patch.object(hospital_db, "NMC_PAGE_ROWS", 2)
+    @mock.patch.object(hospital_db, "PAGE_ROWS", 2)
     def test_pages_until_short_page_with_retry(self):
         self.fetch.side_effect = [[{"a": 1}, {"a": 2}], None, [{"a": 3}, {"a": 4}], [{"a": 5}]]
         self.assertEqual(len(hospital_db.fetch_nmc_all()), 5)
         self.assertEqual([c.args[2]["pageNo"] for c in self.fetch.call_args_list], [1, 2, 2, 3])
 
-    @mock.patch.object(hospital_db, "NMC_PAGE_ROWS", 2)
+    @mock.patch.object(hospital_db, "PAGE_ROWS", 2)
     def test_gives_up_after_three_failures(self):
         self.fetch.side_effect = [[{"a": 1}, {"a": 2}], None, None, None]
         with self.assertRaises(RuntimeError):
             hospital_db.fetch_nmc_all()
 
+    def test_each_list_uses_its_own_api(self):
+        self.fetch.return_value = []
+        hospital_db.fetch_pharmacies_all()
+        hospital_db.fetch_ers_all()
+        self.assertEqual([c.args[0] for c in self.fetch.call_args_list], [hospital_db.PHARMACY_LIST, egen.ER_LIST])
 
-class EgenSearchTests(unittest.TestCase):
-    """egen.search_emergency: 좌표 → 가까운 응급실 목록."""
+
+class PlacesDbTests(unittest.TestCase):
+    """병원 DB의 약국·응급실·공휴일·지역명 검색 — 요청 때 API를 부르지 않아야 한다(요구사항 IF-08)."""
+
+    def setUp(self):
+        HospitalDbTests.setUp(self)
+        hours.clear_caches()  # 공휴일도 DB에서 읽는지 보려고 미리 넣어 둔 값 제거
+        patches = [mock.patch(f"backend.tools.{m}.fetch_items", side_effect=AssertionError("API 호출 금지"))
+                   for m in ("hira", "hours", "egen", "pharmacy")]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def at(self, when):
+        p = mock.patch("backend.tools.hours.datetime")
+        dt = p.start()
+        self.addCleanup(p.stop)
+        dt.now.return_value = when
+
+    def test_pharmacies_with_opening_hours(self):
+        self.at(kst(2026, 11, 16, 10))  # 월요일 오전
+        out = pharmacy.search_pharmacies(*CITY_HALL)
+        self.assertEqual([(p["name"], p["kind"], p["dept"], p["is_open"]) for p in out],
+                         [("시청앞약국", "약국", "약국", True), ("시간모름약국", "약국", "약국", None)])
+        self.assertEqual(out[0]["address"], "서울특별시 중구 세종대로 10")
+        for p in out:
+            HospitalOut(**p)
+
+    def test_pharmacy_holiday_hours_from_db(self):
+        self.at(kst(2026, 12, 25, 12))  # 공휴일(DB에 저장) 단축 운영 09~13시
+        self.assertTrue(pharmacy.search_pharmacies(*CITY_HALL, top=1)[0]["is_open"])
+        hours.clear_caches()
+        self.at(kst(2026, 12, 25, 14))
+        self.assertFalse(pharmacy.search_pharmacies(*CITY_HALL, top=1)[0]["is_open"])
+
+    def test_emergency_rooms_from_db(self):
+        out = egen.search_emergency(*CITY_HALL)
+        self.assertEqual([(e["name"], e["phone"], e["kind"], e["is_open"]) for e in out],
+                         [("가까운응급실", "02-응급실직통", "응급실", True), ("먼응급실", "02-999-9999", "응급실", True)])
+        self.assertEqual(out[0]["dept"], "응급의학과")
+
+    def test_holidays_read_from_db(self):
+        self.assertEqual(hours.holidays_of(2026), FIXTURE_HOLIDAYS[2026])
+        self.assertIsNone(hospital_db.holidays(2030))  # 저장 안 된 해는 None → API로 받음
+
+    def test_hospital_results_have_new_fields(self):
+        h = hira.search_hospitals("정형외과", *CITY_HALL, top=1)[0]
+        self.assertEqual((h["kind"], h["address"], h["lat"], h["lng"]),
+                         ("병원", "서울특별시 중구 세종대로 1", 37.5670, 126.9790))
+
+    def test_locate_region(self):
+        lat, lng = hospital_db.locate("서울 중구")
+        self.assertAlmostEqual(lat, 37.5670, places=3)
+        self.assertAlmostEqual(hospital_db.locate("강남구")[0], 37.4979, places=3)
+        self.assertIsNotNone(hospital_db.locate("서울특별시, 종로구"))  # 쉼표·전체 이름도 됨
+        self.assertIsNone(hospital_db.locate("중구"))         # 서울 중구와 부산 중구 → 애매하면 모름
+        for region in ("없는동네", "", None, "100%_할인"):
+            with self.subTest(region=region):
+                self.assertIsNone(hospital_db.locate(region))
+
+    def test_old_format_db_is_not_used(self):
+        with mock.patch.object(hospital_db, "SCHEMA_VERSION", "옛날"), \
+                self.assertLogs("backend.tools.hospital_db", logging.WARNING):
+            hospital_db._checked["key"] = None
+            self.assertFalse(hospital_db.available())
+        hospital_db._checked["key"] = None
+        self.assertTrue(hospital_db.available())
+
+
+class PharmacyApiTests(unittest.TestCase):
+    """병원 DB가 없을 때의 약국 API 경로."""
 
     def setUp(self):
         clear_caches()
-        patcher = mock.patch("backend.tools.egen.fetch_items")
-        self.fetch = patcher.start()
-        self.addCleanup(patcher.stop)
+        pharmacy._cache.clear()
+        p1 = mock.patch("backend.tools.pharmacy.fetch_items")
+        p2 = mock.patch("backend.tools.hospital_db.available", return_value=False)
+        self.fetch, _ = p1.start(), p2.start()
+        self.addCleanup(p1.stop)
+        self.addCleanup(p2.stop)
+
+    def test_nearest_first_without_opening_status(self):
+        self.fetch.return_value = [
+            {"dutyName": "먼약국", "latitude": 37.5700, "longitude": 126.9900, "dutyTel1": "02-1", "dutyAddr": "A"},
+            {"dutyName": "가까운약국", "latitude": 37.5667, "longitude": 126.9782, "dutyTel1": "02-2", "dutyAddr": "B"},
+            {"dutyName": "좌표없음"},
+        ]
+        out = pharmacy.search_pharmacies(*CITY_HALL)
+        self.assertEqual([(p["name"], p["is_open"], p["kind"]) for p in out],
+                         [("가까운약국", None, "약국"), ("먼약국", None, "약국")])
+        params = self.fetch.call_args.args[2]
+        self.assertEqual((params["WGS84_LAT"], params["WGS84_LON"]), CITY_HALL)
+        pharmacy.search_pharmacies(*CITY_HALL)
+        self.assertEqual(self.fetch.call_count, 1)  # 같은 위치는 캐시
+
+    def test_failure_and_missing_location(self):
+        self.fetch.return_value = None
+        self.assertEqual(pharmacy.search_pharmacies(*CITY_HALL), [])
+        self.assertEqual(pharmacy.search_pharmacies(None, None), [])
+
+
+class EgenSearchTests(unittest.TestCase):
+    """egen.search_emergency: 좌표 → 가까운 응급실 목록 (병원 DB가 없을 때의 API 경로)."""
+
+    def setUp(self):
+        clear_caches()
+        p1 = mock.patch("backend.tools.egen.fetch_items")
+        p2 = mock.patch("backend.tools.hospital_db.available", return_value=False)
+        self.fetch, _ = p1.start(), p2.start()
+        self.addCleanup(p1.stop)
+        self.addCleanup(p2.stop)
 
     def test_nearest_first(self):
         self.fetch.return_value = [
@@ -741,41 +879,72 @@ class SearchNodeTests(unittest.TestCase):
                              {"name": "재활의학과", "score": 0.5, "reason": "보조"}],
              "location": {"lat": CITY_HALL[0], "lng": CITY_HALL[1]}}
 
-    @mock.patch("backend.tools.egen.search_emergency")
-    @mock.patch("backend.tools.hira.search_hospitals")
-    def test_returns_only_hospitals_field(self, hira_search, er_search):
-        hira_search.return_value = [{"name": "병원", "dept": "정형외과", "distance_m": 100, "is_open": None, "phone": None}]
-        er_search.return_value = [{"name": "응급실", "dept": "응급의학과", "distance_m": 900, "is_open": True, "phone": None}]
+    def setUp(self):
+        self.hira = self._patch("backend.tools.hira.search_hospitals", [{"name": "병원", "kind": "병원"}])
+        self.drug = self._patch("backend.tools.pharmacy.search_pharmacies", [{"name": "약국", "kind": "약국"}])
+        self.er = self._patch("backend.tools.egen.search_emergency", [{"name": "응급실", "kind": "응급실"}])
+
+    def _patch(self, target, result):
+        p = mock.patch(target, return_value=result)
+        m = p.start()
+        self.addCleanup(p.stop)
+        return m
+
+    def test_emergency_branch_returns_only_er(self):
+        # 요구사항 FR-08·IF-03: 응급이면 일반 병원 검색 없이 가까운 응급실만
+        out = search.search_emergency_rooms(dict(self.STATE))
+        self.assertEqual(out, {"hospitals": [{"name": "응급실", "kind": "응급실"}]})
+        self.er.assert_called_once_with(*CITY_HALL)
+        self.hira.assert_not_called()
+        self.drug.assert_not_called()
+        self.assertEqual(search.search_emergency_rooms({"location": {}}), {"hospitals": []})
+
+    def test_returns_only_hospitals_field(self):
         state = dict(self.STATE)
         out = search.search_hospitals(state)
         self.assertEqual(list(out), ["hospitals"])
-        self.assertEqual([h["name"] for h in out["hospitals"]], ["병원", "응급실"])  # 병원 먼저, 응급실 뒤
-        hira_search.assert_called_once_with("정형외과", *CITY_HALL)  # Top-1 진료과로 검색
+        self.assertEqual([h["name"] for h in out["hospitals"]], ["병원", "약국", "응급실"])  # 병원 → 약국 → 응급실
+        self.hira.assert_called_once_with("정형외과", *CITY_HALL)  # Top-1 진료과로 검색
+        self.drug.assert_called_once_with(*CITY_HALL)
         self.assertEqual(state, self.STATE)  # 입력 State는 건드리지 않는다
 
-    @mock.patch("backend.tools.egen.search_emergency")
-    @mock.patch("backend.tools.hira.search_hospitals")
-    def test_runs_both_searches_concurrently(self, hira_search, er_search):
-        def slow(result):
-            def run(*_):
-                time.sleep(0.3)
-                return result
-            return run
-        hira_search.side_effect = slow([])
-        er_search.side_effect = slow([])
+    def test_runs_searches_concurrently(self):
+        def slow(*_):
+            time.sleep(0.3)
+            return []
+        for m in (self.hira, self.drug, self.er):
+            m.side_effect = slow
         t = time.time()
         search.search_hospitals(dict(self.STATE))
-        self.assertLess(time.time() - t, 0.55)  # 순서대로면 0.6초 이상
+        self.assertLess(time.time() - t, 0.55)  # 순서대로면 0.9초 이상
 
-    @mock.patch("backend.tools.egen.search_emergency")
-    @mock.patch("backend.tools.hira.search_hospitals")
-    def test_skips_search_without_department_or_location(self, hira_search, er_search):
-        for state in ({}, {"departments": []}, {"departments": self.STATE["departments"]},
+    def test_no_location_no_search(self):
+        for state in ({}, {"departments": self.STATE["departments"]},
                       {"departments": self.STATE["departments"], "location": {"lat": None, "lng": None}}):
             with self.subTest(state=state):
                 self.assertEqual(search.search_hospitals(state), {"hospitals": []})
-        hira_search.assert_not_called()
-        er_search.assert_not_called()
+        for m in (self.hira, self.drug, self.er):
+            m.assert_not_called()
+
+    def test_without_department_only_pharmacy_and_er(self):
+        out = search.search_hospitals({"departments": [], "location": {"lat": CITY_HALL[0], "lng": CITY_HALL[1]}})
+        self.assertEqual([h["name"] for h in out["hospitals"]], ["약국", "응급실"])
+        self.hira.assert_not_called()
+
+    def test_region_used_when_no_coordinates(self):
+        with mock.patch("backend.tools.hospital_db.available", return_value=True), \
+                mock.patch("backend.tools.hospital_db.locate", return_value=(37.45, 126.67)) as locate:
+            search.search_hospitals({**self.STATE, "location": {"region": "인천 미추홀구"}})
+        locate.assert_called_once_with("인천 미추홀구")
+        self.hira.assert_called_once_with("정형외과", 37.45, 126.67)
+
+    def test_unknown_region_or_no_db(self):
+        with mock.patch("backend.tools.hospital_db.available", return_value=True), \
+                mock.patch("backend.tools.hospital_db.locate", return_value=None):
+            self.assertEqual(search.search_hospitals({**self.STATE, "location": {"region": "중구"}}), {"hospitals": []})
+        with mock.patch("backend.tools.hospital_db.available", return_value=False):
+            self.assertEqual(search.search_hospitals({**self.STATE, "location": {"region": "인천"}}), {"hospitals": []})
+        self.hira.assert_not_called()
 
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -804,10 +973,22 @@ class DepartmentCoverageTests(unittest.TestCase):
 
 @unittest.skipUnless(os.getenv("LIVE_API") == "1", "실제 API 호출은 LIVE_API=1 일 때만")
 class LiveApiTests(unittest.TestCase):
-    """실제 공공 API 호출 확인 (.env 키 필요). API 서버가 느리면 1~2분 걸린다."""
+    """실제 공공 API 호출 확인 (.env 키 필요). API 서버가 느리면 1~2분 걸린다.
+    병원 DB가 있어도 API 경로를 검사하도록 DB는 끈다."""
 
     def setUp(self):
         clear_caches()
+        pharmacy._cache.clear()
+        p = mock.patch("backend.tools.hospital_db.available", return_value=False)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_pharmacy_live(self):
+        out = pharmacy.search_pharmacies(*CITY_HALL)
+        self.assertEqual(len(out), 3, "약국 API 결과 없음: 활용신청·키 확인")
+        self.assertLess(out[0]["distance_m"], 1000)
+        for p in out:
+            HospitalOut(**p)
 
     def test_hira_live(self):
         out = hira.search_hospitals("정형외과", *CITY_HALL)
