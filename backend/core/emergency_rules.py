@@ -3,6 +3,7 @@
 안전이 최우선 — '놓치지 않는 것(미탐 최소화)'을 우선한다.
 이번 주 범위는 키워드 기반 1차 필터다. 상세 정책: docs/emergency_rules.md
 """
+import re
 import unicodedata
 
 EMERGENCY_KEYWORDS = [
@@ -88,14 +89,26 @@ EMERGENCY_KEYWORDS = [
 ]
 
 
+# 치과 맥락과 위험 표현을 함께 요구한다. '이' 단독은 일반 조사와 겹쳐 쓰지 않는다.
+_DENTAL_CONTEXT = ("잇몸", "사랑니", "어금니", "앞니", "치통", "치아", "이빨",
+                   "발치", "이를뽑", "치과")
+_DENTAL_RED_FLAGS = tuple(re.compile(pattern) for pattern in (
+    r"목(?:까지|도|주변(?:이|까지)?|쪽까지)(?:많이|심하게|퉁퉁|점점|계속|너무|아주)?(?:부어|부었|붓|부은)",
+    r"삼키(?:기(?:가|도)?|는게)(?:너무|많이|정말|점점|매우)?(?:힘|어렵|어려)",
+    r"(?:침|음식|물)(?:을|도|조차)?(?:잘)?못삼",
+    r"삼킬수(?:가)?없|삼키지못",
+))
+
+
 def _normalize(text: str) -> str:
     """한글 조합 형태와 띄어쓰기·탭·줄바꿈의 차이를 없앤다."""
     return "".join(unicodedata.normalize("NFKC", text).split())
 
 
 def is_emergency(text: str) -> bool:
-    """위험 표현 하나라도 일치하면 True. False는 응급 배제를 뜻하지 않는다.
+    """기존 키워드 또는 치과 맥락+위험 표현이 일치하면 True.
 
+    False는 응급 배제를 뜻하지 않는다.
     부정문·과거력도 일치하면 True로 유지한다. 문장에 '없다'가 있다는
     이유만으로 다른 위험 신호까지 제외하지 않는다. 빈 입력은 False이며
     추가 문진 여부는 에이전트에서 결정한다.
@@ -103,4 +116,9 @@ def is_emergency(text: str) -> bool:
     if not text:
         return False
     normalized = _normalize(text)
-    return any(_normalize(kw) in normalized for kw in EMERGENCY_KEYWORDS)
+    if any(_normalize(kw) in normalized for kw in EMERGENCY_KEYWORDS):
+        return True
+    return (
+        any(context in normalized for context in _DENTAL_CONTEXT)
+        and any(pattern.search(normalized) for pattern in _DENTAL_RED_FLAGS)
+    )
