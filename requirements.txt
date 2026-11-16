@@ -1,24 +1,24 @@
-# --- 웹 서버 ---
+# web server
 fastapi
 uvicorn[standard]
 pydantic
 python-dotenv
 
-# --- 외부 API 호출 ---
+# external API calls
 requests
 
-# --- 에이전트 ---
+# agent (LangGraph / LangChain)
 langgraph
 langchain
 
-# --- RAG (Vector DB) ---
-chromadb
+# LLM provider: GPT (OpenAI) - uses the class-provided key
+langchain-openai
 
-# --- LLM (GPT / OpenAI) ---
-langchain-openai          # 수업에서 제공하는 OpenAI 키 사용
-
-# --- 임베딩 (로컬 한국어, 무료) ---
+# embeddings: local Korean model (free, no key)
 sentence-transformers
 
-# --- 확장: 음성 문진 ---
+# RAG vector DB
+chromadb
+
+# (optional) voice input
 # openai-whisper
