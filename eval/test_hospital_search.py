@@ -778,6 +778,30 @@ class SearchNodeTests(unittest.TestCase):
         er_search.assert_not_called()
 
 
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+class DepartmentCoverageTests(unittest.TestCase):
+    """팀이 쓰는 진료과 이름은 모두 병원 검색이 되어야 한다.
+    (분류는 data/departments/ 문서 이름으로 진료과를 고르고, 평가셋은 그 이름을 정답으로 쓴다)
+    실패하면: 병원 검색이 모르는 진료과가 추가된 것 → hira.py의 DGSBJT/ALIASES에 추가 필요(최건)."""
+
+    def test_department_docs_are_searchable(self):
+        docs = sorted(f for f in os.listdir(os.path.join(REPO, "data", "departments")) if f.endswith(".md"))
+        self.assertTrue(docs)
+        for doc in docs:
+            with self.subTest(doc=doc):
+                self.assertIsNotNone(hira.resolve(doc[:-3])[1], f"{doc}: 병원 검색이 지원하지 않는 진료과")
+
+    def test_testset_answers_are_searchable(self):
+        with open(os.path.join(REPO, "eval", "testset.csv"), encoding="utf-8") as f:
+            answers = {row["answer_dept"] for row in csv.DictReader(f)}
+        self.assertIn("치과", answers)
+        for dept in sorted(answers):
+            with self.subTest(dept=dept):
+                self.assertIsNotNone(hira.resolve(dept)[1], f"평가셋 정답 '{dept}': 병원 검색이 지원하지 않는 진료과")
+
+
 @unittest.skipUnless(os.getenv("LIVE_API") == "1", "실제 API 호출은 LIVE_API=1 일 때만")
 class LiveApiTests(unittest.TestCase):
     """실제 공공 API 호출 확인 (.env 키 필요). API 서버가 느리면 1~2분 걸린다."""
