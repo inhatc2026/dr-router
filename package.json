@@ -1,0 +1,11 @@
+{
+  "name": "dr-router-frontend",
+  "private": true,
+  "scripts": {
+    "test:frontend": "node --test eval/test_frontend.cjs",
+    "test:browser": "node eval/test_frontend_browser.cjs"
+  },
+  "devDependencies": {
+    "playwright": "1.65.1"
+  }
+}

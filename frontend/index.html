@@ -7,7 +7,7 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;900&family=Poppins:wght@600;700&display=swap">
 <style>
   :root{
-    --blue:#1a6fb5; --blue-d:#155a94; --ink:#14304d; --muted:#5d7088;
+    --blue:#1a6fb5; --blue-d:#155a94; --ink:#14304d; --muted:#53657b;
     --bg:#ffffff; --panel:#f6f9fc; --line:#e7edf4; --soft:#eaf2fb; --red:#e0564e; --green:#2e9e6b;
   }
   *{box-sizing:border-box;}
@@ -71,6 +71,15 @@
     .hero h1{font-size:40px;}
   }
   @media(max-width:520px){ .grid3,.steps{grid-template-columns:1fr;} }
+  /* v0.5 접근성: 모바일에서도 메뉴 유지, 본문/터치 크기 보완 */
+  body,.btn,.eyebrow,.pill,.card p,.step p,footer,.note small{font-size:16px}
+  .note small{color:var(--muted)}
+  a.btn,.menu a,.logo{min-height:44px}
+  .menu a{display:inline-flex;align-items:center;min-width:44px}
+  :focus-visible{outline:3px solid #b47400;outline-offset:3px}
+  .hero-art svg{max-width:100%;height:auto}
+  @media(max-width:860px){.nav-in{height:auto;min-height:70px;flex-wrap:wrap;gap:12px;padding-top:12px;padding-bottom:12px}.menu{display:flex;flex-wrap:wrap;gap:16px}.nav-in>.btn{display:none}}
+  @media(max-width:520px){.wrap{padding-left:16px;padding-right:16px}.logo .en{display:none}.cta-banner{padding:28px 20px}}
 </style>
 </head>
 <body>
