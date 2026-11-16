@@ -220,9 +220,44 @@ class HiraSearchTests(unittest.TestCase):
         self.assertEqual(out[0]["dept"], "소아청소년과")
 
     def test_unknown_department(self):
-        with self.assertLogs("backend.tools.hira", logging.WARNING):
-            self.assertEqual(hira.search_hospitals("치과", *CITY_HALL), [])
+        for dept in ("한의원", "한방내과", "병리과"):  # 한방은 팀 결정으로 제외, 병리과는 환자가 찾아가는 과가 아님
+            with self.subTest(dept=dept), self.assertLogs("backend.tools.hira", logging.WARNING):
+                self.assertEqual(hira.search_hospitals(dept, *CITY_HALL), [])
         self.fetch.assert_not_called()
+
+    def test_department_resolution(self):
+        internal, dental = ("내과", ("01",)), ("치과", hira.DENTAL_CODES)
+        for name, expected in [("내과", internal), ("소화기내과", internal), ("순환기내과", internal),
+                               ("호흡기내과", internal), ("내분비내과", internal), ("신장내과", internal),
+                               ("치과", dental), ("치주과", dental), ("치과교정과", dental),
+                               ("구강내과", dental),               # '…내과'지만 치과
+                               ("소아과", ("소아청소년과", ("11",))),
+                               ("한방내과", ("한방내과", None))]:
+            with self.subTest(name=name):
+                self.assertEqual(hira.resolve(name), expected)
+        self.assertEqual(len(hira.DENTAL_CODES), 12)
+
+    def test_internal_subspecialty_searches_internal_medicine(self):
+        # 팀 평가셋 정답에 '소화기내과'·'순환기내과'·'호흡기내과'가 있다
+        self.fetch.return_value = [hira_item("A", 10)] * 5
+        out = hira.search_hospitals("소화기내과", *CITY_HALL)
+        self.assertEqual(self.fetch.call_args.args[2]["dgsbjtCd"], "01")
+        self.assertEqual(out[0]["dept"], "내과")
+
+    def test_dental_api_uses_clinic_types_and_merges(self):
+        by_type = {"41": [hira_item("치과병원A", 300, ykiho="D1")],
+                   "51": [hira_item("치과의원B", 100, ykiho="D2"), hira_item("치과병원A", 300, ykiho="D1")]}
+        self.fetch.side_effect = lambda url, key, params, timeout: by_type[params["clCd"]]
+        out = hira.search_hospitals("치과", *CITY_HALL, top=2)
+        self.assertEqual([h["name"] for h in out], ["치과의원B", "치과병원A"])  # 중복 제거 + 거리순
+        sent = [c.args[2] for c in self.fetch.call_args_list]
+        self.assertEqual(sorted(p["clCd"] for p in sent), ["41", "51"])
+        self.assertTrue(all("dgsbjtCd" not in p for p in sent))
+
+    def test_dental_api_partial_failure(self):
+        self.fetch.side_effect = lambda url, key, params, timeout: None if params["clCd"] == "41" else []
+        self.assertEqual(hira.search_hospitals("치과", *CITY_HALL), [])
+        self.assertEqual(self.fetch.call_count, 2)  # 실패하면 반경을 넓혀 다시 부르지 않음
 
     def test_missing_location(self):
         self.assertEqual(hira.search_hospitals("내과", None, None), [])
@@ -275,7 +310,7 @@ class HiraSearchTests(unittest.TestCase):
     def test_failure_is_not_cached(self):
         self.fetch.return_value = None  # API 실패
         self.assertEqual(hira.search_hospitals("내과", *CITY_HALL), [])
-        self.fetch.return_value = [hira_item("A", 10)] * 5
+        self.fetch.return_value = [hira_item(f"병원{i}", i) for i in range(5)]
         self.assertEqual(len(hira.search_hospitals("내과", *CITY_HALL)), 5)
 
 
@@ -521,6 +556,7 @@ def write_fixture_zip(path):
         ["Y4", "시간없는의원", "의원", "서울특별시 종로구 종로 2", "02-444-4444", "126.9810", "37.5690"],
         ["Y5", "먼내과의원", "의원", "서울특별시 강남구 강남대로 1", "02-555-5555", "127.0276", "37.4979"],
         ["Y6", "좌표없는의원", "의원", "서울특별시 중구 세종대로 3", "02-666-6666", "", ""],
+        ["Y7", "동네치과의원", "치과의원", "서울특별시 중구 세종대로 4", "02-777-7777", "126.9785", "37.5668"],
     ]
     days = ["일요일", "월요일", "화요일", "수요일", "목요일", "금요일", "토요일"]
     detail_header = ["암호화요양기호", "요양기관명", "휴진안내_공휴일", "점심시간_평일", "점심시간_토요일"]
@@ -528,7 +564,8 @@ def write_fixture_zip(path):
     weekday_hours = ["0", "0"] + ["900", "1800"] * 5 + ["900", "1300"]
     detail = [["Y1", "가까운정형외과의원", "전부 휴진", "13시00분~14시00분", ""] + weekday_hours,
               ["Y3", "상세만있는의원", "휴진", "12:30~13:30", ""] + weekday_hours]
-    subj = [["Y1", "05"], ["Y2", "05"], ["Y3", "05"], ["Y4", "05"], ["Y5", "01"], ["Y6", "05"], ["Y1", "01"]]
+    subj = [["Y1", "05"], ["Y2", "05"], ["Y3", "05"], ["Y4", "05"], ["Y5", "01"], ["Y6", "05"], ["Y1", "01"],
+            ["Y7", "51"], ["Y7", "54"], ["Y7", "56"]]  # 치과의원은 '49 치과' 대신 세부 코드 여러 개
     with zipfile.ZipFile(path, "w") as z:
         z.writestr("1.병원정보서비스(2026.9.).csv", csv_bytes(hosp_header, hosp))
         z.writestr("4.의료기관별상세정보서비스_02_세부정보(2026.9.).csv", csv_bytes(detail_header, detail))
@@ -560,11 +597,11 @@ class HospitalDbTests(unittest.TestCase):
         self.addCleanup(p.stop)
 
     def test_build_stats(self):
-        self.assertEqual(self.stats["hospitals"], 5)   # 좌표 없는 1곳 제외
+        self.assertEqual(self.stats["hospitals"], 6)   # 좌표 없는 1곳 제외
         self.assertEqual(self.stats["no_coords"], 1)
         self.assertEqual(self.stats["nmc"], 2)         # Y1, Y2
         self.assertEqual(self.stats["hira"], 1)        # Y3 (병·의원 찾기에 없음 → 심평원 세부정보)
-        self.assertEqual(self.stats["none"], 2)        # Y4, Y5
+        self.assertEqual(self.stats["none"], 3)        # Y4, Y5, Y7
         self.assertEqual(hospital_db.info()["hira_version"], "테스트_20260930")
         self.assertFalse(os.path.exists(self.db_path + ".tmp"))
 
@@ -597,6 +634,13 @@ class HospitalDbTests(unittest.TestCase):
                           ("시간없는의원", "정형외과", None)])
         for h in out:
             HospitalOut(**h)
+
+    def test_dental_matches_any_dental_code_once(self):
+        out = hospital_db.search(hira.DENTAL_CODES, *CITY_HALL, 2000, 10)
+        self.assertEqual([h["name"] for h, _ in out], ["동네치과의원"])  # 코드 3개에 걸려도 한 번만
+        self.assertEqual([h["name"] for h, _ in hospital_db.search("49", *CITY_HALL, 2000, 10)], [])
+        found = hira.search_hospitals("치주과", *CITY_HALL)
+        self.assertEqual([(h["name"], h["dept"]) for h in found], [("동네치과의원", "치과")])
 
     def test_hira_widens_radius_in_db(self):
         out = hira.search_hospitals("내과", *CITY_HALL, top=2)

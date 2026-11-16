@@ -25,7 +25,7 @@ import sys
 import time
 import zipfile
 from math import cos, radians
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import requests
 
@@ -71,17 +71,21 @@ def available() -> bool:
     return os.path.isfile(DB_PATH)
 
 
-def search(code: str, lat: float, lng: float, radius_m: int, limit: int) -> List[Tuple[Dict, Optional[hours.Schedule]]]:
-    """진료과목코드가 있는 병원을 반경 안에서 가까운 순으로. [(병원 dict, 진료시간표), ...]"""
+def search(codes: Union[str, Sequence[str]], lat: float, lng: float, radius_m: int,
+           limit: int) -> List[Tuple[Dict, Optional[hours.Schedule]]]:
+    """진료과목코드 중 하나라도 있는 병원을 반경 안에서 가까운 순으로. [(병원 dict, 진료시간표), ...]"""
+    codes = (codes,) if isinstance(codes, str) else tuple(codes)
     dlat = radius_m / 111_320
     dlng = radius_m / (111_320 * max(cos(radians(lat)), 0.01))
+    marks = ",".join("?" * len(codes))
     con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
     try:
+        # 치과처럼 코드가 여러 개면 한 병원이 여러 코드에 걸리므로 EXISTS로 한 번만 센다
         rows = con.execute(
-            "SELECT h.name, h.phone, h.lat, h.lng, h.schedule FROM subject s "
-            "JOIN hospital h ON h.ykiho = s.ykiho "
-            "WHERE s.code = ? AND h.lat BETWEEN ? AND ? AND h.lng BETWEEN ? AND ?",
-            (code, lat - dlat, lat + dlat, lng - dlng, lng + dlng)).fetchall()
+            "SELECT h.name, h.phone, h.lat, h.lng, h.schedule FROM hospital h "
+            "WHERE h.lat BETWEEN ? AND ? AND h.lng BETWEEN ? AND ? "
+            f"AND EXISTS (SELECT 1 FROM subject s WHERE s.ykiho = h.ykiho AND s.code IN ({marks}))",
+            (lat - dlat, lat + dlat, lng - dlng, lng + dlng, *codes)).fetchall()
     finally:
         con.close()
     found = []
