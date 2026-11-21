@@ -6,6 +6,10 @@ test('unknown hours stay distinct from closed and only true matches open filter'
   assert.equal(api.openStatus(null).text, '확인 필요');
   assert.equal(api.openStatus(undefined).text, '확인 필요');
   assert.equal(api.openStatus(false).text, '진료중 아님');
+  assert.equal(api.openStatus(true, '응급실').text, '24시간');
+  assert.equal(api.openStatus(null, '응급실').text, '확인 필요');
+  assert.equal(api.openStatus(false, '응급실').text, '진료중 아님');
+  assert.equal(api.openStatus(true, '병원').text, '진료중');
   const input = [true, false, null].map(is_open => ({ kind: '약국', is_open }));
   assert.deepEqual(api.filterHospitals(input, '약국', true), [input[0]]);
 });
@@ -29,6 +33,11 @@ test('map coordinates do not turn missing or invalid positions into zero', () =>
   assert.equal(api.mapLinks({ lat: '37', lng: '126' }), null);
   const map = api.mapLinks({ lat: 37.5, lng: 126.6 });
   assert.equal(new URL(map.embed).searchParams.get('marker'), '37.5,126.6');
+  const directions = new URL(map.directions);
+  assert.equal(directions.origin + directions.pathname, 'https://www.google.com/maps/dir/');
+  assert.equal(directions.searchParams.get('api'), '1');
+  assert.equal(directions.searchParams.get('destination'), '37.5,126.6');
+  assert.equal(directions.searchParams.has('origin'), false);
   assert.ok(api.mapLinks({ lat: 0, lng: 0 }));
 });
 test('telephone links reject non-phone URLs', () => {

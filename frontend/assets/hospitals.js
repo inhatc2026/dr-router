@@ -22,11 +22,23 @@ function showMap(item) {
   if (map) { map.setView([item.lat, item.lng], 15); markersByItem.get(item)?.openPopup(); }
   mapPanel.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
-function renderMap(items) {
+function renderMap(items, emptyMessage) {
   document.querySelector("#map-name").textContent = "의료기관 위치";
   document.querySelector("#map-address").textContent = "색상과 글자로 기관 종류를 구분합니다.";
   document.querySelector("#external-map").hidden = true;
   const placeholder = document.querySelector("#map-placeholder");
+  document.querySelector(".map-legend").hidden = !items.length;
+  document.querySelector(".map-foot").hidden = !items.length;
+  document.querySelector("#map-status").hidden = !items.length;
+  if (!items.length) {
+    mapNode.hidden = true;
+    placeholder.hidden = false;
+    placeholder.textContent = emptyMessage;
+    document.querySelector("#map-address").textContent = "";
+    markers?.clearLayers();
+    markersByItem.clear();
+    return;
+  }
   const points = items.filter(item => placesApi.mapLinks(item));
   const userPoint = snapshot?.position && placesApi.mapLinks(snapshot.position) ? snapshot.position : null;
   mapNode.hidden = !window.L || !(points.length || userPoint);
@@ -60,13 +72,25 @@ function render() {
   const source = snapshot?.emergency ? placesApi.filterHospitals(snapshot.hospitals, "응급실").slice(0, 3) : snapshot?.hospitals || [];
   const items = placesApi.filterHospitals(source, activeKind, document.querySelector("#only-open").checked);
   resultCount.textContent = `${items.length}곳`;
-  renderMap(items);
+  const emptyMessage = !snapshot
+    ? "AI 문진을 먼저 진행해 주세요."
+    : source.length ? "선택한 조건에 맞는 의료기관이 없습니다. 필터를 바꿔 보세요."
+    : snapshot.emergency ? "이번 응답에 응급실 정보가 없습니다. 목록을 기다리지 말고 119에 연락하세요."
+    : "이번 응답에 의료기관이 없습니다. 위치나 지역을 지정하고 AI 문진을 이어가 주세요.";
+  document.querySelector(".filters").hidden = !source.length;
+  document.querySelector(".open-filter").hidden = !source.length || snapshot?.emergency === true;
+  document.querySelectorAll(".result-note").forEach(note => { note.hidden = !source.length; });
+  renderMap(items, emptyMessage);
   if (!items.length) {
-    hospitalList.append(placesApi.element("p", "empty-state", !snapshot
-      ? "표시할 결과가 없거나 조회 후 30분이 지났습니다. AI 문진에서 새로 안내받아 주세요."
-      : source.length ? "선택한 조건에 맞는 의료기관이 없습니다. 필터를 바꿔 보세요."
-      : snapshot.emergency ? "이번 응답에 응급실 정보가 없습니다. 목록을 기다리지 말고 119에 연락하세요."
-      : "이번 응답에 의료기관이 없습니다. 위치나 지역을 지정하고 문진을 이어가 주세요."));
+    const empty = placesApi.element("div", "empty-state");
+    empty.append(placesApi.element("p", "", emptyMessage));
+    if (!snapshot) empty.append(placesApi.element("p", "note", "문진 결과는 이 탭에서 조회 후 30분 동안 확인할 수 있습니다."));
+    if (!source.length && !snapshot?.emergency) {
+      const chat = placesApi.element("a", "btn", snapshot ? "AI 문진 이어가기" : "AI 문진 시작하기");
+      chat.href = "chat.html";
+      empty.append(chat);
+    }
+    hospitalList.append(empty);
     return;
   }
   items.forEach(item => hospitalList.append(placesApi.placeCard(item, showMap)));
