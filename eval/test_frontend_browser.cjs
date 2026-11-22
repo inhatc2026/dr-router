@@ -65,6 +65,8 @@ async function checkAccessibility(page) {
       const data = mode === 'followup' ? { ...reply, reply: '언제부터 불편하셨나요?', need_more_info: true }
         : mode === 'emergency' ? { reply: '즉시 응급 안내를 확인하세요.', emergency: true, need_more_info: false, hospitals: [], departments: [] }
         : mode === 'emergency-places' ? { ...reply, emergency: true, need_more_info: true }
+        : mode === 'sources' ? { ...reply, departments: [{ name: '정형외과', score: .8, reason: '문서 범위와 입력을 비교했습니다.', sources: ['정형외과.md', '<img src=x onerror="window.injected=true">'] }] }
+        : mode === 'sources-low' ? { ...reply, departments: [{ name: '정형외과', score: .3, reason: '정보 부족', sources: ['정형외과.md'] }] }
         : mode === 'low-score' ? { ...reply, departments: [{ name: '외과', score: .2, reason: '정보 부족' }, { name: '내과', score: .4, reason: '정보 부족' }, { name: '치과', score: .1, reason: '정보 부족' }, { name: '피부과', score: .05, reason: '정보 부족' }] }
         : mode === 'unsafe-text' ? { ...reply, reply: '<img src=x onerror="window.injected=true">', hospitals: [{ ...places[3], name: '<script>window.injected=true</script>' }] }
         : reply;
@@ -161,6 +163,25 @@ async function checkAccessibility(page) {
     await checkAccessibility(page);
     await page.screenshot({ path: path.resolve(__dirname, '../test-results/hospitals-mobile.png'), fullPage: true });
     console.log('PASS chat → follow-up → hospital list, filters, status, distance, phone, map, mobile');
+
+    await page.goto(`${base}/chat.html`);
+    mode = 'sources';
+    await page.locator('#message').fill('무릎이 시큰거려요');
+    await page.locator('#send').click();
+    await page.locator('#recommendations').waitFor({ state: 'visible' });
+    assert.match(await page.locator('#recommendations').innerText(), /근거 문서: 정형외과.md/);
+    assert.doesNotMatch(await page.locator('#recommendations').innerText(), /근거 문서를 확인할 수 없어/);
+    assert.equal(await page.locator('#recommendations img').count(), 0);
+    assert.equal(await page.evaluate(() => window.injected), undefined);
+    assert.deepEqual(await page.evaluate(() => DrRouter.loadResults().departments), [{ name: '정형외과' }]);
+    mode = 'sources-low';
+    await page.locator('#message').fill('아직 불편해요');
+    await page.locator('#send').click();
+    await page.waitForFunction(() => document.querySelector('#recommendations').textContent.includes('분류 확신이 낮아'));
+    assert.match(await page.locator('#recommendations').innerText(), /정형외과.md/);
+    assert.match(await page.locator('#recommendations').innerText(), /방문해 상담/);
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    console.log('PASS source document rendering, safe text, low confidence and storage minimization');
 
     await page.goto(`${base}/chat.html`);
     mode = 'failure';

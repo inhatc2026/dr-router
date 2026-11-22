@@ -84,7 +84,9 @@ def emergency_node(state: AgentState) -> dict:
 
 def respond_node(state: AgentState) -> dict:
     depts = state.get("departments") or []
-    if depts:
+    if depts and all(d.get("sources") for d in depts) and depts[0].get("score", 0) >= 0.5:
+        msg = "증상과 참고 문서를 바탕으로 진료과 후보를 안내합니다. 의학적 진단이 아니며, 정확한 판단은 의료기관을 방문해 상담해 주세요."
+    elif depts:
         msg = "참고 진료과 후보와 주변 의료기관을 확인해 주세요. 근거 확인이 필요하므로 의료기관을 방문해 상담해 주세요."
     else:
         msg = "진료과를 판단할 정보가 부족합니다. 의료기관을 방문해 상담해 주세요."

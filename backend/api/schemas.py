@@ -2,7 +2,7 @@
 API 요청/응답 모델 — ★ 프론트↔백엔드 공유 계약 (소유자: 최건)
 프론트의 fetch 본문/응답이 이 모델과 일치해야 한다.
 """
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional
 
 
@@ -18,6 +18,7 @@ class DepartmentOut(BaseModel):
     name: str
     score: float
     reason: str
+    sources: List[str] = Field(default_factory=list)  # FR-13: RAG 근거 문서명 (추가 선택 필드)
 
 
 class HospitalOut(BaseModel):
