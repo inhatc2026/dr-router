@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 DB_PATH = os.getenv("HOSPITAL_DB", "data/raw/hospitals.sqlite")  # data/raw/는 .gitignore 대상
 RAW_DIR = os.path.dirname(DB_PATH) or "."
-SCHEMA_VERSION = "2"  # 표 구조를 바꾸면 올린다 → 옛 DB는 쓰지 않고 다시 만들라고 안내
+SCHEMA_VERSION = "3"  # 표 구조를 바꾸면 올린다 → 옛 DB는 쓰지 않고 다시 만들라고 안내 (3: 지역명 색인 추가)
 
 # 공공데이터포털 파일데이터 (페이지의 '다운로드' 버튼이 쓰는 주소)
 PORTAL_PAGE = "https://www.data.go.kr/data/15051059/fileData.do"
@@ -73,6 +73,13 @@ CREATE TABLE place (
 CREATE INDEX place_kind_lat_lng ON place(kind, lat, lng);
 CREATE TABLE subject (code TEXT, id TEXT, PRIMARY KEY (code, id)) WITHOUT ROWID;  -- 병원 진료과목
 CREATE TABLE holiday (day TEXT PRIMARY KEY);  -- 'YYYY-MM-DD'
+CREATE TABLE area (           -- 지역명 색인: 병원 주소의 행정구역 하나당 한 줄 (resolve_region용)
+    unit TEXT,                -- '서울특별시', '중구', '태평로1가' …
+    id TEXT,                  -- place.id (병원)
+    units TEXT,               -- 그 병원의 행정구역 전체, 탭으로 구분
+    lat REAL, lng REAL
+);
+CREATE INDEX area_unit ON area(unit);
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
 """
 
@@ -99,6 +106,15 @@ def available() -> bool:
                            "그때까지는 API로 검색합니다.")
         _checked.update(key=key, ok=ok)
     return _checked["ok"]
+
+
+def _db_key():
+    """DB 파일이 바뀌면(다시 만들면) 달라지는 값 — 캐시를 파일별로 나누는 데 쓴다."""
+    try:
+        st = os.stat(DB_PATH)
+    except OSError:
+        return None
+    return DB_PATH, st.st_mtime_ns, st.st_size
 
 
 def search(codes: Union[str, Sequence[str]], lat: float, lng: float, radius_m: int,
@@ -166,27 +182,62 @@ def resolve_region(text: str, near: Optional[Tuple[float, float]] = None) -> Dic
                    후보가 비어 있으면 범위가 너무 넓은 것 → 더 자세히 되묻기
       not_found  : 모르는 지역명
     시군구·읍면동 단위까지 지원한다. 도로명('세종대로', '강남대로')에는 걸리지 않는다.
+    DB를 만들 때 미리 만든 행정구역 색인(area 표)으로 찾고 결과를 캐시하므로 보통 수 ms다.
+    (그래프의 응급실 조회 대기 0.5초 안에 들어와야 한다)
     """
-    result = {"status": REGION_NOT_FOUND, "point": None, "name": None, "candidates": []}
-    tokens = [t for t in re.split(r"[\s,]+", str(text or "").strip()) if t][:4]
-    if not tokens:
-        return result
+    tokens = tuple(t for t in re.split(r"[\s,]+", str(text or "").strip()) if t)[:4]
+    found = _analyze_region(tokens) if tokens else (REGION_NOT_FOUND,)
+    result = {"status": found[0], "point": None, "name": None, "candidates": []}
+    if found[0] == REGION_OK:
+        return {**result, "point": found[1], "name": found[2]}
+    if found[0] == REGION_AMBIGUOUS:  # GPS 거리는 부를 때마다 계산 (캐시는 GPS와 무관하게)
+        candidates = [{"name": name, "lat": lat, "lng": lng, "count": count,
+                       "distance_m": haversine_m(near[0], near[1], lat, lng) if near else None}
+                      for name, (lat, lng), count in found[1]]
+        candidates.sort(key=(lambda c: c["distance_m"]) if near else (lambda c: -c["count"]))
+        return {**result, "candidates": candidates[:5]}
+    return result
+
+
+_region_cache: Dict[Tuple, Tuple] = {}
+_REGION_CACHE_MAX = 512
+
+
+def _analyze_region(tokens: Tuple[str, ...]) -> Tuple:
+    """→ ("ok", 중심, 이름) / ("ambiguous", [(이름, 중심, 병원 수)...]) / ("not_found",). DB 파일별 캐시."""
+    key = (_db_key(), tokens)
+    if key in _region_cache:
+        return _region_cache[key]
+    found = _analyze_region_uncached(tokens)
+    if len(_region_cache) >= _REGION_CACHE_MAX:
+        _region_cache.clear()
+    _region_cache[key] = found
+    return found
+
+
+def _analyze_region_uncached(tokens: Tuple[str, ...]) -> Tuple:
     longest = max(tokens, key=len)
-    escape = longest.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     con = _connect()
-    try:  # 가장 긴 단어로 먼저 좁힌 뒤, 행정구역 단위로 다시 확인한다
-        rows = con.execute("SELECT addr, lat, lng FROM place WHERE kind = ? AND addr LIKE ? ESCAPE '\\'",
-                           (HOSPITAL, f"%{escape}%")).fetchall()
+    try:  # 가장 긴 단어로 시작하는 행정구역을 색인으로 찾은 뒤, 나머지 단어도 모두 맞는지 확인한다
+        rows = con.execute("SELECT DISTINCT id, units, lat, lng FROM area WHERE unit >= ? AND unit < ?",
+                           (longest, longest + "\U0010FFFF")).fetchall()
+        if not rows and con.execute("SELECT 1 FROM area LIMIT 1").fetchone() is None:
+            # 색인이 빈 DB(place에 직접 넣어 만든 테스트 DB 등) → 주소를 직접 훑는다 (느리지만 결과는 같음)
+            escape = longest.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            rows = [(pid, "\t".join(_admin_units(addr)), lat, lng) for pid, addr, lat, lng in con.execute(
+                "SELECT id, addr, lat, lng FROM place WHERE kind = ? AND addr LIKE ? ESCAPE '\\'",
+                (HOSPITAL, f"%{escape}%"))]
     finally:
         con.close()
     matched = []
-    for addr, lat, lng in rows:
-        units = _admin_units(addr)
+    for _id, units, lat, lng in rows:
+        units = units.split("\t")
         if all(any(u.startswith(t) for u in units) for t in tokens):
             matched.append((units, lat, lng))
     if not matched:
-        return result
+        return (REGION_NOT_FOUND,)
 
+    # 95% 기준: 병원 DB 주소 기준 병원 수 비율 (요구사항 v0.6 FR-29)
     groups = _significant(_group(matched, 2), len(matched))
     top = max(groups, key=lambda k: len(groups[k]))
     if len(groups[top]) >= _DOMINANT * len(matched):  # '강남'(강남구 99.5%), '세종'(세종시 99%)은 그곳으로
@@ -195,18 +246,11 @@ def resolve_region(text: str, near: Optional[Tuple[float, float]] = None) -> Dic
         (name, pts), = groups.items()
         center = _center(pts)
         if _compact(center, pts):
-            return {**result, "status": REGION_OK, "point": center, "name": name}
+            return (REGION_OK, center, name)
         groups = _significant(_group(pts, 3), len(pts))  # 넓은 시(예: 용인시)는 구 단위 후보로
         if len(groups) == 1:
             groups = {}  # 더 나눌 수 없을 만큼 넓음 → 후보 없이 되묻기
-
-    candidates = []
-    for name, pts in groups.items():
-        lat, lng = _center(pts)
-        candidates.append({"name": name, "lat": lat, "lng": lng, "count": len(pts),
-                           "distance_m": haversine_m(near[0], near[1], lat, lng) if near else None})
-    candidates.sort(key=(lambda c: c["distance_m"]) if near else (lambda c: -c["count"]))
-    return {**result, "status": REGION_AMBIGUOUS, "candidates": candidates[:5]}
+    return (REGION_AMBIGUOUS, [(name, _center(pts), len(pts)) for name, pts in groups.items()])
 
 
 def locate(region: str) -> Optional[Tuple[float, float]]:
@@ -355,6 +399,7 @@ def build(zip_path: str, nmc_items: List[Dict], out_path: str = DB_PATH, version
         con.executescript(SCHEMA)
         con.executemany("INSERT OR IGNORE INTO place VALUES (?,?,?,?,?,?,?,?,?)", records)
         con.executemany("INSERT OR IGNORE INTO subject VALUES (?,?)", subjects)
+        con.executemany("INSERT INTO area VALUES (?,?,?,?,?)", _area_rows(records))
         con.executemany("INSERT INTO holiday VALUES (?)", [(d,) for d in days])
         con.executemany("INSERT INTO meta VALUES (?,?)", [
             ("schema_version", SCHEMA_VERSION), ("hira_version", version),
@@ -366,6 +411,17 @@ def build(zip_path: str, nmc_items: List[Dict], out_path: str = DB_PATH, version
         con.close()
     os.replace(tmp, out_path)
     return stats
+
+
+def _area_rows(records):
+    """병원 주소의 행정구역마다 한 줄씩 → 지역명 색인. (place 레코드: kind, id, name, addr, …, lat, lng, …)"""
+    for kind, pid, _name, addr, _phone, lat, lng, *_ in records:
+        if kind != HOSPITAL:
+            continue
+        units = _admin_units(addr)
+        joined = "\t".join(units)
+        for unit in dict.fromkeys(units):  # 중복 제거, 순서 유지
+            yield unit, pid, joined, lat, lng
 
 
 def _read_csv(zip_path: str, prefix: str) -> List[Dict]:
