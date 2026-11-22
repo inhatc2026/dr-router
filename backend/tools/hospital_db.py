@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 DB_PATH = os.getenv("HOSPITAL_DB", "data/raw/hospitals.sqlite")  # data/raw/는 .gitignore 대상
 RAW_DIR = os.path.dirname(DB_PATH) or "."
-SCHEMA_VERSION = "3"  # 표 구조를 바꾸면 올린다 → 옛 DB는 쓰지 않고 다시 만들라고 안내 (3: 지역명 색인 추가)
+SCHEMA_VERSION = "4"  # 표 구조를 바꾸면 올린다 → 옛 DB는 쓰지 않고 다시 만들라고 안내 (3: 지역명 색인, 4: 과목별 전문의 수)
 
 # 공공데이터포털 파일데이터 (페이지의 '다운로드' 버튼이 쓰는 주소)
 PORTAL_PAGE = "https://www.data.go.kr/data/15051059/fileData.do"
@@ -71,7 +71,11 @@ CREATE TABLE place (
     PRIMARY KEY (kind, id)
 );
 CREATE INDEX place_kind_lat_lng ON place(kind, lat, lng);
-CREATE TABLE subject (code TEXT, id TEXT, PRIMARY KEY (code, id)) WITHOUT ROWID;  -- 병원 진료과목
+CREATE TABLE subject (           -- 병원 진료과목
+    code TEXT, id TEXT,
+    specialists INTEGER DEFAULT 0,  -- 그 과목 전문의 수 (검색 때 전문의 있는 병원을 먼저)
+    PRIMARY KEY (code, id)
+) WITHOUT ROWID;
 CREATE TABLE holiday (day TEXT PRIMARY KEY);  -- 'YYYY-MM-DD'
 CREATE TABLE area (           -- 지역명 색인: 병원 주소의 행정구역 하나당 한 줄 (resolve_region용)
     unit TEXT,                -- '서울특별시', '중구', '태평로1가' …
@@ -118,13 +122,18 @@ def _db_key():
 
 
 def search(codes: Union[str, Sequence[str]], lat: float, lng: float, radius_m: int,
-           limit: int) -> List[Tuple[Dict, Optional[hours.Schedule]]]:
-    """진료과목코드 중 하나라도 있는 병원을 반경 안에서 가까운 순으로. [(장소 dict, 진료시간표), ...]"""
+           limit: int, prefer_specialist: bool = False) -> List[Tuple[Dict, Optional[hours.Schedule]]]:
+    """진료과목코드 중 하나라도 있는 병원을 반경 안에서 가까운 순으로. [(장소 dict, 진료시간표), ...]
+
+    prefer_specialist=True면 그 과 전문의가 있는 병원을 먼저, 없는 병원을 뒤에(각각 가까운 순) 둔다.
+    (진료과목만 등록한 다른 과 의원 — 예: 외과를 찾는데 산부인과의원 — 이 1위로 나오는 것을 막는다)
+    """
     codes = (codes,) if isinstance(codes, str) else tuple(codes)
     marks = ",".join("?" * len(codes))
-    # 치과처럼 코드가 여러 개면 한 병원이 여러 코드에 걸리므로 EXISTS로 한 번만 센다
-    extra = f"AND EXISTS (SELECT 1 FROM subject s WHERE s.id = p.id AND s.code IN ({marks}))"
-    return _near(HOSPITAL, lat, lng, radius_m, limit, extra, codes)
+    # 그 과목들 중 가장 많은 전문의 수. 치과처럼 코드가 여러 개여도 병원당 한 번만 나온다.
+    # NULL이면 그 과목을 등록하지 않은 병원 → 제외
+    spec = f"(SELECT MAX(s.specialists) FROM subject s WHERE s.id = p.id AND s.code IN ({marks}))"
+    return _near(HOSPITAL, lat, lng, radius_m, limit, spec, codes, prefer_specialist)
 
 
 def search_kind(kind: str, lat: float, lng: float, radius_m: int,
@@ -143,25 +152,29 @@ def nearest(fetch, radii: Sequence[int], limit: int):
     return found
 
 
-def _near(kind, lat, lng, radius_m, limit, extra="", extra_args=()):
+def _near(kind, lat, lng, radius_m, limit, spec_sql=None, spec_args=(), prefer_spec=False):
     dlat = radius_m / 111_320
     dlng = radius_m / (111_320 * max(cos(radians(lat)), 0.01))
     con = _connect()
     try:
         rows = con.execute(
-            "SELECT p.name, p.phone, p.addr, p.lat, p.lng, p.schedule FROM place p "
-            f"WHERE p.kind = ? AND p.lat BETWEEN ? AND ? AND p.lng BETWEEN ? AND ? {extra}",
-            (kind, lat - dlat, lat + dlat, lng - dlng, lng + dlng, *extra_args)).fetchall()
+            f"SELECT p.name, p.phone, p.addr, p.lat, p.lng, p.schedule, {spec_sql or 0} AS spec FROM place p "
+            "WHERE p.kind = ? AND p.lat BETWEEN ? AND ? AND p.lng BETWEEN ? AND ?"
+            + (" AND spec IS NOT NULL" if spec_sql else ""),
+            (*(spec_args if spec_sql else ()), kind, lat - dlat, lat + dlat, lng - dlng, lng + dlng)).fetchall()
     finally:
         con.close()
     found = []
-    for name, phone, addr, p_lat, p_lng, schedule in rows:
+    for name, phone, addr, p_lat, p_lng, schedule, spec in rows:
         d = haversine_m(lat, lng, p_lat, p_lng)
         if d is not None and d <= radius_m:
             found.append(({"name": name, "distance_m": d, "phone": phone or None,
-                           "address": addr or None, "lat": p_lat, "lng": p_lng}, schedule))
-    found.sort(key=lambda r: r[0]["distance_m"])
-    return [(p, hours.Schedule.from_json(s)) for p, s in found[:limit]]
+                           "address": addr or None, "lat": p_lat, "lng": p_lng}, schedule, spec or 0))
+    if prefer_spec:
+        found.sort(key=lambda r: (r[2] <= 0, r[0]["distance_m"]))
+    else:
+        found.sort(key=lambda r: r[0]["distance_m"])
+    return [(p, hours.Schedule.from_json(s)) for p, s, _ in found[:limit]]
 
 
 # ── 지역명 → 좌표 (요구사항 FR-29·FR-30·EX-03·EX-11) ─────────
@@ -338,7 +351,8 @@ def build(zip_path: str, nmc_items: List[Dict], out_path: str = DB_PATH, version
     """
     hosp_rows = _read_csv(zip_path, "1.")
     details = {r["암호화요양기호"]: _file_detail_to_api(r) for r in _read_csv(zip_path, "4.")}
-    subjects = [(r["진료과목코드"], r["암호화요양기호"]) for r in _read_csv(zip_path, "5.")]
+    subjects = [(r["진료과목코드"], r["암호화요양기호"], _int(r.get("과목별 전문의수")))
+                for r in _read_csv(zip_path, "5.")]
 
     nmc_by_region: Dict[Tuple[str, str], List[Dict]] = {}
     for it in nmc_items:
@@ -398,7 +412,7 @@ def build(zip_path: str, nmc_items: List[Dict], out_path: str = DB_PATH, version
     try:
         con.executescript(SCHEMA)
         con.executemany("INSERT OR IGNORE INTO place VALUES (?,?,?,?,?,?,?,?,?)", records)
-        con.executemany("INSERT OR IGNORE INTO subject VALUES (?,?)", subjects)
+        con.executemany("INSERT OR IGNORE INTO subject VALUES (?,?,?)", subjects)
         con.executemany("INSERT INTO area VALUES (?,?,?,?,?)", _area_rows(records))
         con.executemany("INSERT INTO holiday VALUES (?)", [(d,) for d in days])
         con.executemany("INSERT INTO meta VALUES (?,?)", [
@@ -411,6 +425,13 @@ def build(zip_path: str, nmc_items: List[Dict], out_path: str = DB_PATH, version
         con.close()
     os.replace(tmp, out_path)
     return stats
+
+
+def _int(value) -> int:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return 0
 
 
 def _area_rows(records):

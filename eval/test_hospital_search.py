@@ -666,6 +666,38 @@ class HospitalDbTests(unittest.TestCase):
         for h in out:
             HospitalOut(**h)
 
+    def _set_specialists(self, pid, code, n):
+        con = sqlite3.connect(self.db_path)
+        try:
+            con.execute("UPDATE subject SET specialists = ? WHERE id = ? AND code = ?", (n, pid, code))
+            con.commit()
+        finally:
+            con.close()
+
+    def test_specialists_default_zero_when_column_missing(self):
+        # 픽스처 zip에는 '과목별 전문의수' 칸이 없다 → 0으로 저장
+        con = sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual(con.execute("SELECT COUNT(*) FROM subject WHERE specialists IS NULL OR specialists != 0")
+                             .fetchone()[0], 0)
+        finally:
+            con.close()
+
+    def test_specialist_first_then_distance(self):
+        # Y2(조금먼정형외과의원)만 정형외과 전문의가 있으면, 더 가까운 곳들보다 먼저 나온다
+        self._set_specialists("Y2", "05", 2)
+        out = hira.search_hospitals("정형외과", *CITY_HALL, top=3)
+        self.assertEqual([h["name"] for h in out], ["조금먼정형외과의원", "가까운정형외과의원", "상세만있는의원"])
+        # 요청하지 않으면 거리순 그대로
+        plain = hospital_db.search("05", *CITY_HALL, radius_m=2000, limit=3)
+        self.assertEqual([h["name"] for h, _ in plain], ["가까운정형외과의원", "상세만있는의원", "시간없는의원"])
+
+    def test_dental_stays_distance_order(self):
+        with mock.patch.object(hospital_db, "search", wraps=hospital_db.search) as spy:
+            hira.search_hospitals("치과", *CITY_HALL)
+        self.assertFalse(spy.call_args.kwargs["prefer_specialist"])
+        hira.search_hospitals("정형외과", *CITY_HALL)
+
     def test_dental_matches_any_dental_code_once(self):
         out = hospital_db.search(hira.DENTAL_CODES, *CITY_HALL, 2000, 10)
         self.assertEqual([h["name"] for h, _ in out], ["동네치과의원"])  # 코드 3개에 걸려도 한 번만

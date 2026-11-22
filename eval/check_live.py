@@ -114,6 +114,14 @@ def need(*conds):
     return None
 
 
+def in_region(d, region, max_m=3000):
+    """지역명 검색 결과 확인: 1위 병원은 그 지역 주소, 나머지는 지역 중심에서 max_m 안.
+    (지역 중심에서 반경으로 찾으므로 바로 옆 구의 가까운 병원이 섞이는 것은 정상)"""
+    hs = [h for h in d["hospitals"] if h["kind"] == "병원"]
+    return need((hs, "병원 없음"), (hs and region in (hs[0].get("address") or ""), f"1위가 {region}가 아님"),
+                (all(h["distance_m"] <= max_m for h in hs), f"지역 중심에서 {max_m}m 밖 병원이 섞임"))
+
+
 def run_scenarios():
     print("\n■ /api/chat 시나리오 (요구사항 6장 + NFR-07)")
     client = TestClient(app)
@@ -140,18 +148,14 @@ def run_scenarios():
              lambda d: need((d["emergency"], "응급 판정 안 됨"), ("119" in d["reply"], "119 안내 없음")),
              limit=EMERGENCY_LIMIT_S)
     scenario(client, "위치 거부 + 지역명 (서울 강남구 역삼동)", {"message": "귀가 먹먹하고 어지러워요", "region": "서울 강남구 역삼동"},
-             lambda d: need((not d["need_more_info"], "되물음"), (kinds(d).get("병원", 0) >= 1, "병원 없음"),
-                            (all("강남구" in (h.get("address") or "") for h in d["hospitals"] if h["kind"] == "병원"),
-                             "강남구 밖 병원이 나옴")), depts("이비인후과"))
+             lambda d: need((not d["need_more_info"], "되물음")) or in_region(d, "서울특별시 강남구"), depts("이비인후과"))
     first = scenario(client, "모호한 지역 + GPS (부산에서 '중구')", {"message": "눈이 충혈되고 이물감이 있어요", "region": "중구", **BUSAN},
                      lambda d: need((d["need_more_info"], "되묻지 않음"), ("부산광역시 중구" in d["reply"], "가까운 후보를 제안하지 않음")),
                      depts("안과"))
     if first:
         hist = [{"role": "user", "content": "눈이 충혈되고 이물감이 있어요"}, {"role": "assistant", "content": first["reply"]}]
         scenario(client, "  └ 후보 확인 '네'", {"message": "네", "region": "중구", "history": hist, **BUSAN},
-                 lambda d: need((not d["need_more_info"], "또 되물음"),
-                                (all("부산광역시 중구" in (h.get("address") or "") for h in d["hospitals"] if h["kind"] == "병원")
-                                 and kinds(d).get("병원", 0) >= 1, "부산 중구 병원이 아님")), depts("안과"))
+                 lambda d: need((not d["need_more_info"], "또 되물음")) or in_region(d, "부산광역시 중구"), depts("안과"))
     scenario(client, "모호한 지역 + GPS 없음 ('제주')", {"message": "피부에 붉은 발진이 생기고 가려워요", "region": "제주"},
              lambda d: need((d["need_more_info"], "되묻지 않음")), depts("피부과"))
     scenario(client, "대표 지역명 ('강남' → 되묻지 않음)", {"message": "피부에 붉은 발진이 생기고 가려워요", "region": "강남"},
