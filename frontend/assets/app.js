@@ -41,8 +41,8 @@
     if (distanceValue(value) === Infinity) return "거리 정보 없음";
     return value < 1000 ? `${Math.round(value).toLocaleString("ko-KR")} m` : `${(value / 1000).toLocaleString("ko-KR", { maximumFractionDigits: 1 })} km`;
   }
-  function openStatus(value) {
-    if (value === true) return { text: "진료중", className: "open" };
+  function openStatus(value, kind) {
+    if (value === true) return { text: kind === "응급실" ? "24시간" : "진료중", className: "open" };
     if (value === false) return { text: "진료중 아님", className: "closed" };
     return { text: "확인 필요", className: "unknown" };
   }
@@ -61,6 +61,8 @@
     return {
       embed: `https://www.openstreetmap.org/export/embed.html?${params}`,
       external: `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lng}#map=16/${lat}/${lng}`,
+      // 출발지는 지도에서 확인한다. 조회 당시 GPS를 현재 위치로 재사용하지 않는다.
+      directions: `https://www.google.com/maps/dir/?${new URLSearchParams({ api: "1", destination: `${lat},${lng}` })}`,
     };
   }
   function phoneLink(phone) {

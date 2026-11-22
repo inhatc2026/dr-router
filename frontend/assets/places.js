@@ -4,7 +4,7 @@ window.DrRouter.placeCard = function (item, onMap) {
   const api = window.DrRouter;
   const card = api.element("article", "hospital-card");
   const heading = api.element("div", "card-heading");
-  const status = api.openStatus(item.is_open);
+  const status = api.openStatus(item.is_open, api.kindOf(item));
   heading.append(api.element("h2", "", item.name || "이름 정보 없음"), api.element("span", `tag ${status.className}`, status.text));
   const labels = api.element("div", "labels");
   labels.append(api.element("span", "kind", api.kindOf(item)));
@@ -29,6 +29,14 @@ window.DrRouter.placeCard = function (item, onMap) {
     const link = api.element("a", "btn secondary", "지도 보기 ↗");
     link.href = links.external; link.target = "_blank"; link.rel = "noopener noreferrer";
     actions.append(link);
+  }
+  if (links) {
+    const directions = api.element("a", "btn secondary", "길찾기 ↗");
+    directions.href = links.directions;
+    directions.target = "_blank";
+    directions.rel = "noopener noreferrer";
+    directions.setAttribute("aria-label", `${item.name || "의료기관"} 길찾기 (구글맵, 새 창)`);
+    actions.append(directions);
   }
   const details = api.element("details", "place-details");
   details.append(api.element("summary", "", "상세 정보"),
