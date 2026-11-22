@@ -34,7 +34,7 @@ def get_collection():
 def retrieve(query: str, k: int = 3) -> List[Dict]:
     """증상 쿼리로 관련 진료과 문서 Top-k를 검색한다.
 
-    반환: [{"dept": 진료과명, "text": 문서 본문, "score": 0~1 (높을수록 유사)}, ...]
+    반환: [{"dept": 진료과명, "text": 문서 본문, "score": 0~1 (높을수록 유사), "source": 근거 문서 파일명}, ...]
     인덱스가 없거나 오류가 나면 빈 리스트를 반환한다 (데모가 멈추지 않게).
     """
     if not query or not query.strip():
@@ -54,6 +54,6 @@ def retrieve(query: str, k: int = 3) -> List[Dict]:
     metas = res["metadatas"][0]
     dists = res["distances"][0]
     return [
-        {"dept": m.get("dept"), "text": d, "score": round(1 - dist, 3)}
+        {"dept": m.get("dept"), "text": d, "score": round(1 - dist, 3), "source": m.get("source")}
         for d, m, dist in zip(docs, metas, dists)
     ]

@@ -25,7 +25,7 @@ def main():
         text = _COMMENT.sub("", p.read_text(encoding="utf-8")).strip()  # 양식 안내 주석 제거
         ids.append(p.stem)  # 파일명 = 진료과명 = id
         documents.append(text)
-        metadatas.append({"dept": p.stem})
+        metadatas.append({"dept": p.stem, "source": p.name})  # 출처(근거 문서명)
 
     col = get_collection()
     col.upsert(ids=ids, documents=documents, metadatas=metadatas)
