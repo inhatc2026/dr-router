@@ -104,7 +104,8 @@ def search_emergency(lat: float, lng: float, top: int = 3) -> List[Dict]:
 
 def _pick(cands: List[Dict], beds: Dict, top: int) -> List[Dict]:
     """가까운 순 후보 → 병상을 붙이고, 가장 가까운 곳 기준 PROMOTE_RANGE_M 안에서 포화인 곳만 뒤로 보낸다."""
-    out = [_out(p, beds.get(p.get("id"))) for p in cands]
+    now = datetime.now()
+    out = [_out(p, _valid_bed(beds.get(p.get("id")), now)) for p in cands]
     if not out:
         return []
     limit = out[0]["distance_m"] + PROMOTE_RANGE_M
@@ -112,6 +113,13 @@ def _pick(cands: List[Dict], beds: Dict, top: int) -> List[Dict]:
     far = [h for h in out if h["distance_m"] > limit]
     near.sort(key=lambda h: (_is_full(h["er_beds"]), h["distance_m"]))
     return (near + far)[:top]
+
+
+def _valid_bed(bed: Optional[tuple], now: datetime) -> Optional[tuple]:
+    """응답할 때 기관 입력 시각을 다시 본다. 받을 땐 59분이었어도 갱신이 실패하는 동안 1시간을 넘길 수 있다."""
+    if bed and (now - bed[1]).total_seconds() <= BEDS_ROW_MAX_AGE:
+        return bed
+    return None
 
 
 def _is_full(beds: Optional[int]) -> bool:

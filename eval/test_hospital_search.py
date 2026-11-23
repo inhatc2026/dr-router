@@ -1141,6 +1141,13 @@ class ErBedsTests(unittest.TestCase):
                        {"hvec": 5, "hvidate": 20261123120000})
         self.assertEqual(egen._beds["by_id"], {})
 
+    def test_row_expires_at_read_time(self):
+        """받을 땐 50분이었어도 갱신이 실패하는 동안 1시간을 넘기면 응답에서 뺀다(포화로도 치지 않음)."""
+        self.load_beds(bed_item("A", 0, minutes_ago=50), bed_item("B", 3))
+        egen._beds["by_id"]["A"] = (0, datetime.now() - timedelta(minutes=70))  # 캐시에 남은 채 시간이 지남
+        out = egen.search_emergency(*CITY_HALL)
+        self.assertEqual([(h["name"], h["er_beds"]) for h in out], [("포화A", None), ("여유B", 3), ("모름C", None)])
+
     def test_failed_refresh_keeps_previous_beds(self):
         self.load_beds(bed_item("B", 3))
         self.beds = None  # API 실패
