@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4.1-mini")
 HIRA_API_KEY = os.getenv("HIRA_API_KEY", "")
 EGEN_API_KEY = os.getenv("EGEN_API_KEY", "")
 

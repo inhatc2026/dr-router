@@ -54,7 +54,7 @@ const { chromium } = require('playwright');
     await page.locator('#send').click();
     await page.locator('#results-link').waitFor({ state: 'visible' });
     assert.match(await page.locator('#recommendations').innerText(), /의료기관을 방문해 상담/);
-    assert.equal(await page.locator('.department').count(), 0); // 실제 분류 스텁을 가리지 않는다.
+    assert.equal(await page.locator('.department').count(), 0); // 키 없는 환경의 실제 상담 fallback을 확인한다.
     await page.locator('#results-link').click();
     await page.waitForURL('**/hospitals.html');
     assert.deepEqual(await page.locator('.hospital-card h2').allTextContents(), ['테스트 인천 약국', '테스트 인천 응급실']);

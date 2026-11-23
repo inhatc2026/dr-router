@@ -24,6 +24,11 @@ AMBIGUOUS = {"status": "ambiguous", "point": None,
 class GraphIntegrationTests(unittest.TestCase):
     def setUp(self):
         graph._graph = None
+        # 그래프 검사는 로컬 키·인덱스·모델 다운로드에 의존하지 않는다.
+        # classify가 직접 import한 참조를 모의한다. 분류/RAG 자체 검사는 별도로 수행한다.
+        rag_patch = patch("backend.agent.nodes.classify.retrieve", return_value=[])
+        rag_patch.start()
+        self.addCleanup(rag_patch.stop)
         self.client = TestClient(app)
 
     def tearDown(self):

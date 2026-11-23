@@ -120,15 +120,18 @@ chatForm.addEventListener("submit", async event => {
     if (!response.emergency && response.departments.length) {
       const score = dept => typeof dept.score === "number" && Number.isFinite(dept.score) && dept.score >= 0 && dept.score <= 1 ? dept.score : -1;
       response.departments = [...response.departments].sort((a, b) => score(b) - score(a)).slice(0, 3);
-      // 현재 공유 계약에 출처 필드가 없다. 문서가 있다는 전제로 추천을 확정하지 않는다.
+      const sources = dept => Array.isArray(dept.sources)
+        ? dept.sources.filter(source => typeof source === "string" && source.trim()) : [];
+      const missingSources = response.departments.some(dept => !sources(dept).length);
       recommendations.append(chatApi.element("h2", "", "참고 진료과 후보"));
       recommendations.append(chatApi.element("p", "", score(response.departments[0]) < .5
-        ? "분류 확신이 낮고 근거 문서를 확인할 수 없어 진료과를 확정하기 어렵습니다. 의료기관을 방문해 상담해 주세요."
-        : "근거 문서를 확인할 수 없어 추천을 확정하지 않습니다. 의료기관을 방문해 상담해 주세요."));
+        ? "분류 확신이 낮아 진료과를 확정하기 어렵습니다. 의료기관을 방문해 상담해 주세요."
+        : missingSources ? "근거 문서를 확인할 수 없어 추천을 확정하지 않습니다. 의료기관을 방문해 상담해 주세요."
+        : "증상과 참고 문서를 바탕으로 한 진료과 후보입니다. 의학적 진단이 아니며, 정확한 판단은 의료기관을 방문해 상담해 주세요."));
       for (const dept of response.departments) {
         const row = chatApi.element("div", "department");
         row.append(chatApi.element("h3", "", dept.name), chatApi.element("p", "muted", dept.reason));
-        row.append(chatApi.element("p", "note", `분류 점수: ${score(dept) < 0 ? "정보 없음" : score(dept).toFixed(2)} · 근거 문서: 확인 필요`));
+        row.append(chatApi.element("p", "note", `분류 점수: ${score(dept) < 0 ? "정보 없음" : score(dept).toFixed(2)} · 근거 문서: ${sources(dept).join(", ") || "확인 필요"}`));
         recommendations.append(row);
       }
       recommendations.hidden = false;

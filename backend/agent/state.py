@@ -16,7 +16,7 @@
 
 [규칙] 이 파일은 공유 계약이다. 칸을 추가/변경할 땐 반드시 팀에 공지할 것.
 """
-from typing import TypedDict, List, Optional
+from typing import TypedDict, List, Optional, NotRequired
 
 
 class Department(TypedDict):
@@ -24,6 +24,7 @@ class Department(TypedDict):
     name: str        # 진료과명 (예: "정형외과")
     score: float     # 적합도 0.0 ~ 1.0
     reason: str      # 이 과를 고른 한 줄 근거
+    sources: NotRequired[List[str]]  # RAG 근거 문서명. 기존 생산자는 생략 가능
 
 
 class Hospital(TypedDict):
