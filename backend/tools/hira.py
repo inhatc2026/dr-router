@@ -108,7 +108,11 @@ def search_hospitals(dept: str, lat: float, lng: float, top: int = 5) -> List[Di
 
 
 def _search_db(codes: Sequence[str], dept: str, lat: float, lng: float, top: int):
-    found = hospital_db.nearest(lambda r: hospital_db.search(codes, lat, lng, r, top), DB_RADII, top)
+    # 반경 안에서 그 과 전문의가 있는 병원을 먼저 보여준다(외과를 찾는데 산부인과의원이 1위로 나오지 않게).
+    # 치과는 치과의원이면 모두 적합하고 대부분 세부 과목 전문의가 아니라서 거리순 그대로.
+    prefer = dept != "치과"
+    found = hospital_db.nearest(lambda r: hospital_db.search(codes, lat, lng, r, top, prefer_specialist=prefer),
+                                DB_RADII, top)
     return [({**h, "dept": dept, "kind": hospital_db.HOSPITAL}, schedule) for h, schedule in found]
 
 
