@@ -9,6 +9,8 @@ window.DrRouter.placeCard = function (item, onMap) {
   const labels = api.element("div", "labels");
   labels.append(api.element("span", "kind", api.kindOf(item)));
   if (item.dept && item.dept !== api.kindOf(item)) labels.append(api.element("span", "dept", item.dept));
+  const beds = api.bedStatus(item);
+  if (beds) labels.append(api.element("span", `beds ${beds.className}`, beds.time ? `${beds.text} · ${beds.time} 기준` : beds.text));
   const distance = api.element("p", "distance", api.formatDistance(item.distance_m));
   if (typeof item.distance_m === "number" && item.distance_m > 5000) distance.append(api.element("span", "far-note", " · 5 km 밖"));
   const actions = api.element("div", "actions");
@@ -43,6 +45,7 @@ window.DrRouter.placeCard = function (item, onMap) {
     api.element("p", "", `진료과: ${item.dept || "정보 없음"}`),
     api.element("p", "", `주소: ${item.address || "정보 없음"}`),
     api.element("p", "", `전화: ${item.phone || "정보 없음"}`),
+    ...(beds ? [api.element("p", "", beds.detail)] : []),
     api.element("p", "note", "진료 상태는 조회 시점 기준입니다. 방문 전 전화로 확인해 주세요."));
   card.append(heading, labels, api.element("p", "address", item.address || "주소 정보 없음"), distance, actions, details);
   return card;

@@ -14,7 +14,7 @@ const server = http.createServer(async (req, res) => {
   catch { res.writeHead(404).end(); }
 });
 const places = [
-  { name: '검증응급실', kind: '응급실', dept: '응급의학과', distance_m: 2000, is_open: true, phone: '032-222-3333', address: '인천 미추홀구 응급로 3', lat: 37.46, lng: 126.66 },
+  { name: '검증응급실', kind: '응급실', dept: '응급의학과', distance_m: 2000, is_open: true, phone: '032-222-3333', address: '인천 미추홀구 응급로 3', lat: 37.46, lng: 126.66, er_beds: 0, er_beds_at: '2026-11-23T19:50' },
   { name: '먼거리의원', kind: '병원', dept: '내과', distance_m: 42500, is_open: null, phone: null, address: '인천 강화군 예시로 42', lat: 37.74, lng: 126.49 },
   { name: '검증약국', kind: '약국', dept: '약국', distance_m: 100, is_open: false, phone: '032-123-4567', address: null, lat: null, lng: null },
   { name: '가까운의원', kind: '병원', dept: '내과', distance_m: 350, is_open: true, phone: '032-555-6666', address: '인천 미추홀구 예시로 1', lat: 37.45, lng: 126.65 },
@@ -229,6 +229,7 @@ async function checkAccessibility(page) {
     await page.locator('#send').click();
     await page.locator('#emergency-places .hospital-card').waitFor();
     assert.deepEqual(await page.locator('#emergency-places h2').allTextContents(), ['검증응급실']);
+    assert.equal(await page.locator('#emergency-places .beds.full').textContent(), '병상 포화 · 19:50 기준');
     assert.equal(await page.locator('#emergency-places .tag').innerText(), '24시간');
     assert.equal(await page.locator('#emergency-places').getByRole('link', { name: /길찾기/ }).count(), 1);
     assert.equal(await page.locator('#recommendations').isVisible(), false);

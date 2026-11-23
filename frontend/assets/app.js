@@ -91,13 +91,25 @@
       return data;
     } catch { clearResults(); return null; }
   }
+  function bedStatus(item) {
+    // 응급실 실시간 가용병상(er_beds). 0 이하는 포화. 값이 없으면 표시하지 않는다(구버전 응답·정보 없는 기관).
+    if (!item || kindOf(item) !== "응급실" || typeof item.er_beds !== "number" || !Number.isFinite(item.er_beds)) return null;
+    const matched = typeof item.er_beds_at === "string" ? item.er_beds_at.match(/T(\d\d:\d\d)$/) : null;
+    const time = matched ? matched[1] : null;
+    const count = Math.trunc(item.er_beds);
+    const full = count <= 0;
+    return {
+      text: full ? "병상 포화" : `병상 ${count}`, className: full ? "full" : "free", time,
+      detail: `실시간 병상: ${full ? "포화" : `${count}개`}${time ? ` (${time} 기관 입력 기준)` : ""}. 실제와 다를 수 있으니 이동 전에 전화로 확인하세요.`,
+    };
+  }
   function element(tag, className, text) {
     const node = document.createElement(tag);
     if (className) node.className = className;
     if (text !== undefined && text !== null) node.textContent = String(text);
     return node;
   }
-  const api = { sendChat, KINDS, kindOf, formatDistance, openStatus, filterHospitals, mapLinks, phoneLink, saveResults, loadResults, clearResults, element };
+  const api = { sendChat, KINDS, kindOf, formatDistance, openStatus, bedStatus, filterHospitals, mapLinks, phoneLink, saveResults, loadResults, clearResults, element };
   root.DrRouter = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(globalThis);

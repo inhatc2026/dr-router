@@ -137,9 +137,9 @@ def search(codes: Union[str, Sequence[str]], lat: float, lng: float, radius_m: i
 
 
 def search_kind(kind: str, lat: float, lng: float, radius_m: int,
-                limit: int) -> List[Tuple[Dict, Optional[hours.Schedule]]]:
-    """약국·응급실을 반경 안에서 가까운 순으로."""
-    return _near(kind, lat, lng, radius_m, limit)
+                limit: int, with_id: bool = False) -> List[Tuple[Dict, Optional[hours.Schedule]]]:
+    """약국·응급실을 반경 안에서 가까운 순으로. with_id면 기관ID("id")도 붙인다(응급실 실시간 병상 연결용)."""
+    return _near(kind, lat, lng, radius_m, limit, with_id=with_id)
 
 
 def nearest(fetch, radii: Sequence[int], limit: int):
@@ -152,24 +152,27 @@ def nearest(fetch, radii: Sequence[int], limit: int):
     return found
 
 
-def _near(kind, lat, lng, radius_m, limit, spec_sql=None, spec_args=(), prefer_spec=False):
+def _near(kind, lat, lng, radius_m, limit, spec_sql=None, spec_args=(), prefer_spec=False, with_id=False):
     dlat = radius_m / 111_320
     dlng = radius_m / (111_320 * max(cos(radians(lat)), 0.01))
     con = _connect()
     try:
         rows = con.execute(
-            f"SELECT p.name, p.phone, p.addr, p.lat, p.lng, p.schedule, {spec_sql or 0} AS spec FROM place p "
+            f"SELECT p.id, p.name, p.phone, p.addr, p.lat, p.lng, p.schedule, {spec_sql or 0} AS spec FROM place p "
             "WHERE p.kind = ? AND p.lat BETWEEN ? AND ? AND p.lng BETWEEN ? AND ?"
             + (" AND spec IS NOT NULL" if spec_sql else ""),
             (*(spec_args if spec_sql else ()), kind, lat - dlat, lat + dlat, lng - dlng, lng + dlng)).fetchall()
     finally:
         con.close()
     found = []
-    for name, phone, addr, p_lat, p_lng, schedule, spec in rows:
+    for pid, name, phone, addr, p_lat, p_lng, schedule, spec in rows:
         d = haversine_m(lat, lng, p_lat, p_lng)
         if d is not None and d <= radius_m:
-            found.append(({"name": name, "distance_m": d, "phone": phone or None,
-                           "address": addr or None, "lat": p_lat, "lng": p_lng}, schedule, spec or 0))
+            place = {"name": name, "distance_m": d, "phone": phone or None,
+                     "address": addr or None, "lat": p_lat, "lng": p_lng}
+            if with_id:
+                place["id"] = pid
+            found.append((place, schedule, spec or 0))
     if prefer_spec:
         found.sort(key=lambda r: (r[2] <= 0, r[0]["distance_m"]))
     else:

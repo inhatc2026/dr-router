@@ -16,7 +16,7 @@ import tempfile
 import time
 import unittest
 import zipfile
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from unittest import mock
 
 import requests
@@ -1067,6 +1067,137 @@ class SearchNodeTests(unittest.TestCase):
             self.assertEqual(search.find_region("인천")["status"], "unavailable")
             self.assertEqual(search.search_hospitals({**self.STATE, "location": {"region": "인천"}}), {"hospitals": []})
         self.hira.assert_not_called()
+
+
+def bed_item(hpid, beds, minutes_ago=3):
+    """응급실 실시간 가용병상 API 항목. hvidate = 기관 입력 시각(YYYYMMDDHHMMSS)."""
+    at = datetime.now() - timedelta(minutes=minutes_ago)
+    return {"hpid": hpid, "dutyName": hpid, "hvec": beds, "hvidate": int(at.strftime("%Y%m%d%H%M%S"))}
+
+
+def reset_beds(enabled=False):
+    egen._beds.update(enabled=enabled, at=0.0, by_id={}, thread=None)
+
+
+class ErBedsTests(unittest.TestCase):
+    """응급실 실시간 병상: 포화인 곳은 뒤로, 정보 없는 곳은 유지, 응답은 병상 API를 기다리지 않는다."""
+
+    ERS = [  # 서울시청 기준 가까운 순
+        {**er_item("포화A", 37.5670, 126.9785), "hpid": "A"},   # 약 70 m
+        {**er_item("여유B", 37.5700, 126.9800), "hpid": "B"},   # 약 400 m
+        {**er_item("모름C", 37.5750, 126.9830), "hpid": "C"},   # 약 1 km
+        {**er_item("과밀D", 37.5800, 126.9850), "hpid": "D"},   # 약 1.6 km
+    ]
+
+    def setUp(self):
+        clear_caches()
+        reset_beds()
+        self.addCleanup(reset_beds)
+        self.beds = []
+        p1 = mock.patch("backend.tools.egen.fetch_items", side_effect=self._fetch)
+        p2 = mock.patch("backend.tools.hospital_db.available", return_value=False)
+        self.fetch, _ = p1.start(), p2.start()
+        self.addCleanup(p1.stop)
+        self.addCleanup(p2.stop)
+
+    def _fetch(self, url, key, params, timeout=5):
+        return self.ERS if url == egen.ER_LIST else self.beds
+
+    def load_beds(self, *items):
+        """서버가 켜진 상태에서 병상 캐시를 한 번 채운 것과 같게 만든다."""
+        self.beds = list(items)
+        egen._beds["enabled"] = True
+        egen._refresh_beds()
+
+    def test_off_without_server_and_no_beds_call(self):
+        out = egen.search_emergency(*CITY_HALL)
+        self.assertEqual([h["name"] for h in out], ["포화A", "여유B", "모름C"])
+        self.assertTrue(all(h["er_beds"] is None for h in out))
+        self.assertNotIn(egen.ER_BEDS, [c.args[0] for c in self.fetch.call_args_list])
+
+    def test_full_pushed_back_unknown_kept(self):
+        self.load_beds(bed_item("A", 0), bed_item("B", 3), bed_item("D", -2))
+        out = egen.search_emergency(*CITY_HALL)
+        self.assertEqual([(h["name"], h["er_beds"]) for h in out], [("여유B", 3), ("모름C", None), ("포화A", 0)])
+        self.assertRegex(out[0]["er_beds_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d$")
+        self.assertNotIn("id", out[0])
+        for h in out:
+            HospitalOut(**h)
+
+    def test_full_still_listed_when_no_alternative(self):
+        self.load_beds(*(bed_item(h, 0) for h in "ABCD"))
+        out = egen.search_emergency(*CITY_HALL)
+        self.assertEqual([h["name"] for h in out], ["포화A", "여유B", "모름C"])  # 전부 포화면 가까운 순 그대로
+
+    def test_far_er_with_beds_not_promoted(self):
+        self.ERS = [{**er_item("가까운포화", 37.5670, 126.9785), "hpid": "N"},
+                    {**er_item("15km여유", 37.70, 127.05), "hpid": "F"}]
+        self.load_beds(bed_item("N", 0), bed_item("F", 9))
+        out = egen.search_emergency(*CITY_HALL)
+        self.assertEqual([h["name"] for h in out], ["가까운포화", "15km여유"])
+
+    def test_old_or_broken_rows_are_unknown(self):
+        self.load_beds(bed_item("A", 0, minutes_ago=120), {"hpid": "B", "hvec": "?", "hvidate": "x"},
+                       {"hvec": 5, "hvidate": 20261123120000})
+        self.assertEqual(egen._beds["by_id"], {})
+
+    def test_failed_refresh_keeps_previous_beds(self):
+        self.load_beds(bed_item("B", 3))
+        self.beds = None  # API 실패
+        egen._refresh_beds()
+        self.assertEqual(egen._beds["by_id"]["B"][0], 3)
+
+    def test_stale_cache_served_while_refreshing_in_background(self):
+        self.load_beds(bed_item("B", 3))
+        egen._beds["at"] = time.time() - egen.BEDS_TTL - 1  # 오래됨(표시는 가능)
+        started = mock.Mock()
+        with mock.patch.object(egen, "_refresh_beds", side_effect=lambda: (started(), time.sleep(0.5))):
+            t = time.perf_counter()
+            snap = egen._beds_snapshot()
+            waited = time.perf_counter() - t
+            egen._beds_snapshot()  # 갱신 중에는 또 시작하지 않는다
+            egen._beds["thread"].join()
+        self.assertLess(waited, 0.1)
+        self.assertEqual(snap["B"][0], 3)
+        self.assertEqual(started.call_count, 1)
+
+    def test_cold_cache_waits_only_briefly(self):
+        egen._beds["enabled"] = True
+        with mock.patch.object(egen, "_refresh_beds", side_effect=lambda: time.sleep(1.0)):
+            t = time.perf_counter()
+            self.assertEqual(egen._beds_snapshot(), {})
+            self.assertLess(time.perf_counter() - t, egen.BEDS_COLD_WAIT + 0.15)
+
+    def test_too_old_cache_not_shown(self):
+        self.load_beds(bed_item("B", 3))
+        egen._beds["at"] = time.time() - egen.BEDS_MAX_AGE - 1
+        with mock.patch.object(egen, "_refresh_beds"):
+            self.assertEqual(egen._beds_snapshot(), {})
+
+    def test_db_path_uses_institution_id(self):
+        HospitalDbTests.setUp(self)
+        self.beds = [bed_item("E2", 0), bed_item("E1", 4)]  # 픽스처: E2 가까운응급실, E1 먼응급실(약 5 km)
+        egen._beds["enabled"] = True
+        egen._refresh_beds()
+        with mock.patch("backend.tools.hospital_db.available", return_value=True):
+            out = egen.search_emergency(*CITY_HALL)
+        self.assertEqual([(h["name"], h["er_beds"]) for h in out], [("먼응급실", 4), ("가까운응급실", 0)])
+
+    def test_schema_omits_unknown_beds(self):
+        base = {"name": "약국", "dept": "약국", "distance_m": 10, "kind": "약국"}
+        self.assertNotIn("er_beds", HospitalOut(**base).model_dump())
+        dumped = HospitalOut(**base, er_beds=0, er_beds_at="2026-11-23T19:50").model_dump()
+        self.assertEqual((dumped["er_beds"], dumped["er_beds_at"]), (0, "2026-11-23T19:50"))
+
+    def test_server_start_and_stop_toggle_beds(self):
+        from fastapi.testclient import TestClient
+        from backend.main import app
+        with mock.patch.object(egen, "_refresh_beds") as refresh:
+            with TestClient(app):
+                self.assertTrue(egen._beds["enabled"])
+                egen._beds["thread"].join()
+            refresh.assert_called_once()  # 시작할 때 미리 한 번 받아 둔다
+        self.assertFalse(egen._beds["enabled"])
 
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

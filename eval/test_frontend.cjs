@@ -86,6 +86,18 @@ test('result storage expires and does not retain raw conversation or reasons', (
   } finally { global.sessionStorage = original; }
 });
 
+test('emergency bed badge shows count or full and ignores missing or non-ER values', () => {
+  const er = beds => ({ kind: '응급실', er_beds: beds, er_beds_at: '2026-11-23T19:50' });
+  assert.deepEqual([api.bedStatus(er(5)).text, api.bedStatus(er(5)).className, api.bedStatus(er(5)).time], ['병상 5', 'free', '19:50']);
+  assert.equal(api.bedStatus(er(0)).text, '병상 포화');
+  assert.equal(api.bedStatus(er(-3)).className, 'full');
+  assert.match(api.bedStatus(er(2)).detail, /19:50 기관 입력 기준.*전화로 확인/);
+  assert.equal(api.bedStatus({ kind: '응급실', er_beds: 4 }).time, null);
+  for (const item of [{ kind: '응급실' }, er(null), er('3'), er(NaN), { kind: '약국', er_beds: 3 }, null]) {
+    assert.equal(api.bedStatus(item), null);
+  }
+});
+
 test('foreground and background combinations meet 4.5:1 text contrast', () => {
   const luminance = hex => {
     const rgb = hex.match(/\w\w/g).map(value => parseInt(value, 16) / 255)

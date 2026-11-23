@@ -1,7 +1,7 @@
 """시연 전 점검 — 실제 병원 DB로 요구사항 시나리오와 응답 시간을 확인한다 (소유자: 최건)
 
     python -X utf8 -m eval.check_live            # 실제 병원 DB로 시나리오·응답 시간·API 장애 대비 점검
-    python -X utf8 -m eval.check_live --live     # + 실제 공공 API 6종 상태와 DB 진료시간 최신성 표본 비교
+    python -X utf8 -m eval.check_live --live     # + 실제 공공 API 7종 상태, 응급실 실시간 병상, DB 진료시간 최신성 표본 비교
     python -X utf8 -m eval.check_live --md 결과.md  # 결과를 Markdown 표로도 저장 (발표·문서용)
 
 - 병원 DB(python -m backend.tools.hospital_db)가 있어야 한다.
@@ -180,6 +180,48 @@ def run_scenarios():
                  lambda d: full_list(d), depts("정형외과"), runs=1)
     record("시나리오", "  └ 차단 상태에서 시도한 네트워크 호출", not calls, f"{len(calls)}번")
 
+    # 실시간 병상은 서버가 켜질 때만 동작한다. 병상 API가 막혀도 응급 안내는 1초 안에 나와야 한다
+    with BedsOn(), mock.patch("requests.get", blocked), mock.patch("requests.post", blocked):
+        scenario(client, "응급 + 실시간 병상 API 차단", {"message": "갑자기 가슴이 쥐어짜듯 아프고 숨이 안 쉬어져요", **INHA},
+                 lambda d: need((kinds(d) == {"응급실": 3}, "응급실 3곳이 아님"),
+                                (all("er_beds" not in h for h in d["hospitals"]), "차단됐는데 병상이 붙음")),
+                 limit=EMERGENCY_LIMIT_S, runs=1)
+
+
+class BedsOn:
+    """서버 시작 때처럼 실시간 병상 조회를 켠다(캐시는 비운 상태에서 시작). 끝나면 끈다."""
+
+    def __enter__(self):
+        egen._beds.update(enabled=False, at=0.0, by_id={}, thread=None)
+        egen.enable_realtime_beds()
+        return self
+
+    def wait(self):
+        worker = egen._beds["thread"]
+        if worker:
+            worker.join(10)
+
+    def __exit__(self, *exc):
+        self.wait()
+        egen.disable_realtime_beds()
+        egen._beds.update(at=0.0, by_id={}, thread=None)
+
+
+def check_live_beds():
+    """실제 병상 API로 응급 응답에 병상이 붙는지, 포화인 곳이 뒤로 가는지 본다."""
+    client = TestClient(app)
+    with BedsOn() as beds:
+        beds.wait()
+        known = len(egen._beds["by_id"])
+        record("API", "  └ 실시간 병상 캐시", known > 300, f"병상 정보가 있는 응급실 {known}곳 (최근 1시간 안 입력)")
+        data = scenario(client, "응급 + 실시간 병상 (인하공전)", {"message": "갑자기 가슴이 쥐어짜듯 아프고 숨이 안 쉬어져요", **INHA},
+                        lambda d: need((kinds(d) == {"응급실": 3}, "응급실 3곳이 아님"),
+                                       (any("er_beds" in h for h in d["hospitals"]), "병상이 붙은 응급실이 없음")),
+                        limit=EMERGENCY_LIMIT_S)
+        if data:
+            print("         " + " · ".join(f"{h['name']} {h['distance_m']}m 병상 {h.get('er_beds', '정보 없음')}"
+                                          for h in data["hospitals"]))
+
 
 def check_db():
     print("\n■ 병원 DB")
@@ -215,6 +257,7 @@ def check_live_apis():
         ("병·의원 찾기 (진료시간)", hours.NMC_LIST, hours.EGEN_API_KEY, {"Q0": "서울특별시", "Q1": "중구", "numOfRows": 5}, 10),
         ("약국", hospital_db.PHARMACY_LIST, hours.EGEN_API_KEY, {"Q0": "서울특별시", "Q1": "중구", "numOfRows": 5}, 10),
         ("E-Gen 응급실", egen.ER_LIST, hours.EGEN_API_KEY, {"numOfRows": 5}, 10),
+        ("E-Gen 실시간 병상", egen.ER_BEDS, hours.EGEN_API_KEY, {"numOfRows": 5}, 10),
         ("특일 정보 (공휴일)", hours.HOLIDAY, hours.HOLIDAY_API_KEY, {"solYear": datetime.now().year, "numOfRows": 5}, 10),
     ]
     for label, url, key, params, timeout in probes:
@@ -224,6 +267,8 @@ def check_live_apis():
         record("API", label, items is not None, f"응답 {len(items) if items is not None else '실패'}건",
                dt, dt, timeout, warn=items is not None and dt > 5)
     print("    (심평원 병원정보는 평소에도 3~16초 걸립니다. 병원 DB가 있으면 검색에는 쓰이지 않습니다.)")
+    if hospital_db.available():
+        check_live_beds()
 
 
 def check_freshness():
