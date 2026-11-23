@@ -157,7 +157,7 @@ class ClientConfigurationTests(unittest.TestCase):
             self.assertEqual(body["response_format"]["type"], "json_schema")
             self.assertTrue(body["response_format"]["json_schema"]["strict"])
             return httpx.Response(200, json={
-                "id": "test", "object": "chat.completion", "created": 0, "model": "gpt-4o-mini",
+                "id": "test", "object": "chat.completion", "created": 0, "model": "gpt-4.1-mini",
                 "choices": [{"index": 0, "finish_reason": "stop", "message": {
                     "role": "assistant", "content": json.dumps({"departments": [pick()]}, ensure_ascii=False),
                 }}],
@@ -165,7 +165,7 @@ class ClientConfigurationTests(unittest.TestCase):
             })
 
         with httpx.Client(transport=httpx.MockTransport(respond)) as client:
-            model = ChatOpenAI(model="gpt-4o-mini", api_key="test-key", http_client=client, max_retries=0)
+            model = ChatOpenAI(model="gpt-4.1-mini", api_key="test-key", http_client=client, max_retries=0)
             result = model.with_structured_output(classify.Classification, method="json_schema", strict=True).invoke("test")
         self.assertIsInstance(result, classify.Classification)
         self.assertEqual(result.departments[0].name, "정형외과")

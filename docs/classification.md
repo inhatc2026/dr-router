@@ -1,6 +1,8 @@
 # 진료과 분류와 근거 문서 연결
 
-담당: 박태준. 모델 기본값은 가이드의 `gpt-4o-mini`이며 `LLM_MODEL`로 변경한다.
+담당: 박태준. 모델 기본값은 `gpt-4.1-mini`이며 `LLM_MODEL`로 변경한다. 2026-11-23 팀 실측과 사용자 승인으로 가이드의 `gpt-4o-mini`에서 변경했다.
+
+최건 님의 동일 프롬프트·RAG 문서 비교(14문항, 제한 30초, 모델별 1회)에서 gpt-4.1-mini는 Top-3 14/14, 중앙값 1.4초·최대 2.4초였다. 이는 작은 표본의 팀 측정이며 실제 운영의 시간 초과 방지나 정확도를 보장하지 않는다. 기존 gpt-4o-mini의 4초 제한 분류 평가는 12/14(실패 2건 모두 시간 초과)였고, 비교 실험은 별도 조건이다. 서버 첫 요청 10.8초도 보고되어 전체 요청이 항상 5초 이내라는 결론은 내리지 않는다.
 
 ## 선행 조건
 
@@ -11,7 +13,7 @@
 ```powershell
 pip install -r requirements.txt
 # .env에 LLM_API_KEY를 직접 입력한다. 실제 키는 커밋하지 않는다.
-# LLM_MODEL=gpt-4o-mini (생략 가능)
+# LLM_MODEL=gpt-4.1-mini (생략 가능; 기존 .env에 모델이 지정되어 있으면 직접 변경)
 python -m backend.rag.build_index
 python -m uvicorn backend.main:app --reload --port 8001
 ```
