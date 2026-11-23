@@ -55,3 +55,4 @@ summary{cursor:pointer;padding:10px 0;color:var(--blue-d);font-weight:700}
 .beds{display:inline-block;font-size:16px;font-weight:700;padding:3px 9px;border-radius:5px}
 .beds.free{color:#187047;background:#e6f6ee}
 .beds.full{color:#962f28;background:#fff0ed}
+.beds-note{margin:0 0 8px;word-break:keep-all}

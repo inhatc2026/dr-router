@@ -86,16 +86,48 @@ test('result storage expires and does not retain raw conversation or reasons', (
   } finally { global.sessionStorage = original; }
 });
 
+// 2026-11-23 19:50 한국 시간 = 10:50 UTC
+const BED_AT = '2026-11-23T19:50';
+const BED_MS = Date.UTC(2026, 10, 23, 10, 50);
+const minutes = m => m * 60 * 1000;
+
 test('emergency bed badge shows count or full and ignores missing or non-ER values', () => {
-  const er = beds => ({ kind: '응급실', er_beds: beds, er_beds_at: '2026-11-23T19:50' });
-  assert.deepEqual([api.bedStatus(er(5)).text, api.bedStatus(er(5)).className, api.bedStatus(er(5)).time], ['병상 5', 'free', '19:50']);
-  assert.equal(api.bedStatus(er(0)).text, '병상 포화');
-  assert.equal(api.bedStatus(er(-3)).className, 'full');
-  assert.match(api.bedStatus(er(2)).detail, /19:50 기관 입력 기준.*전화로 확인/);
-  assert.equal(api.bedStatus({ kind: '응급실', er_beds: 4 }).time, null);
-  for (const item of [{ kind: '응급실' }, er(null), er('3'), er(NaN), { kind: '약국', er_beds: 3 }, null]) {
-    assert.equal(api.bedStatus(item), null);
+  const er = beds => ({ kind: '응급실', er_beds: beds, er_beds_at: BED_AT });
+  const now = BED_MS + minutes(5);
+  const five = api.bedStatus(er(5), now);
+  assert.deepEqual([five.text, five.className, five.time], ['병상 5', 'free', '19:50']);
+  assert.equal(api.bedStatus(er(0), now).text, '병상 포화');
+  assert.equal(api.bedStatus(er(-3), now).className, 'full');
+  assert.match(api.bedStatus(er(2), now).detail, /19:50 기관 입력 기준/);
+  assert.match(api.bedStatus(er(2), now).notice, /실제와 다를 수.*전화로 확인/);
+  for (const item of [{ kind: '응급실' }, er(null), er('3'), er(NaN), { kind: '약국', er_beds: 3 }, null,
+    { kind: '응급실', er_beds: 4 }, { kind: '응급실', er_beds: 4, er_beds_at: '19:50' }]) {
+    assert.equal(api.bedStatus(item, now), null);
   }
+});
+
+test('bed counts expire after 60 minutes, including results reopened later', () => {
+  const item = { kind: '응급실', er_beds: 3, er_beds_at: BED_AT };
+  assert.ok(api.bedStatus(item, BED_MS + minutes(60)));
+  assert.equal(api.bedStatus(item, BED_MS + minutes(70)), null);   // 저장된 결과를 70분 뒤에 다시 연 경우
+  assert.equal(api.bedStatus(item, BED_MS - minutes(10)), null);   // 기기 시계보다 한참 미래
+  assert.ok(api.bedStatus(item, BED_MS - minutes(3)));             // 약간의 시계 차이는 허용
+});
+
+test('emergency-only lists keep full ERs behind, mixed lists stay in distance order', () => {
+  const now = BED_MS + minutes(5);
+  const er = (name, distance_m, er_beds, er_beds_at = BED_AT) => ({ name, kind: '응급실', distance_m, er_beds, er_beds_at });
+  const names = list => list.map(item => item.name);
+  const full1 = er('포화1km', 1000, 0), free2 = er('여유2km', 2000, 4), unknown3 = { name: '모름3km', kind: '응급실', distance_m: 3000 };
+  assert.deepEqual(names(api.filterHospitals([full1, free2, unknown3], '전체', false, now)), ['여유2km', '모름3km', '포화1km']);
+  assert.deepEqual(names(api.filterHospitals([unknown3, full1, free2], '응급실', false, now)), ['여유2km', '모름3km', '포화1km']);
+  // 가장 가까운 곳보다 10 km 넘게 먼 곳은 앞당기지 않는다 (서버와 같은 규칙)
+  assert.deepEqual(names(api.filterHospitals([er('15km여유', 16000, 9), full1], '응급실', false, now)), ['포화1km', '15km여유']);
+  // 만료된 포화 표시는 포화로 치지 않는다
+  assert.deepEqual(names(api.filterHospitals([free2, er('옛포화1km', 1000, 0, '2026-11-23T17:00')], '응급실', false, now)), ['옛포화1km', '여유2km']);
+  // 여러 종류가 섞인 목록은 거리순(FR-20)
+  const drug = { name: '약국500m', kind: '약국', distance_m: 500 };
+  assert.deepEqual(names(api.filterHospitals([free2, full1, drug], '전체', false, now)), ['약국500m', '포화1km', '여유2km']);
 });
 
 test('foreground and background combinations meet 4.5:1 text contrast', () => {

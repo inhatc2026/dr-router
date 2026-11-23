@@ -13,8 +13,10 @@ const server = http.createServer(async (req, res) => {
   try { res.writeHead(200, { 'Content-Type': mime[path.extname(file)] || 'application/octet-stream' }).end(await fs.readFile(file)); }
   catch { res.writeHead(404).end(); }
 });
+// 응급실 병상은 입력 후 60분이 지나면 표시하지 않으므로 실행 시점 5분 전(한국 시간)으로 만든다
+const bedAt = new Date(Date.now() + 9 * 3600e3 - 5 * 60e3).toISOString().slice(0, 16);
 const places = [
-  { name: '검증응급실', kind: '응급실', dept: '응급의학과', distance_m: 2000, is_open: true, phone: '032-222-3333', address: '인천 미추홀구 응급로 3', lat: 37.46, lng: 126.66, er_beds: 0, er_beds_at: '2026-11-23T19:50' },
+  { name: '검증응급실', kind: '응급실', dept: '응급의학과', distance_m: 2000, is_open: true, phone: '032-222-3333', address: '인천 미추홀구 응급로 3', lat: 37.46, lng: 126.66, er_beds: 0, er_beds_at: bedAt },
   { name: '먼거리의원', kind: '병원', dept: '내과', distance_m: 42500, is_open: null, phone: null, address: '인천 강화군 예시로 42', lat: 37.74, lng: 126.49 },
   { name: '검증약국', kind: '약국', dept: '약국', distance_m: 100, is_open: false, phone: '032-123-4567', address: null, lat: null, lng: null },
   { name: '가까운의원', kind: '병원', dept: '내과', distance_m: 350, is_open: true, phone: '032-555-6666', address: '인천 미추홀구 예시로 1', lat: 37.45, lng: 126.65 },
@@ -229,7 +231,8 @@ async function checkAccessibility(page) {
     await page.locator('#send').click();
     await page.locator('#emergency-places .hospital-card').waitFor();
     assert.deepEqual(await page.locator('#emergency-places h2').allTextContents(), ['검증응급실']);
-    assert.equal(await page.locator('#emergency-places .beds.full').textContent(), '병상 포화 · 19:50 기준');
+    assert.equal(await page.locator('#emergency-places .beds.full').textContent(), `병상 포화 · ${bedAt.slice(11)} 기준`);
+    assert.match(await page.locator('#emergency-places .beds-note').textContent(), /전화로 확인/);
     assert.equal(await page.locator('#emergency-places .tag').innerText(), '24시간');
     assert.equal(await page.locator('#emergency-places').getByRole('link', { name: /길찾기/ }).count(), 1);
     assert.equal(await page.locator('#recommendations').isVisible(), false);
